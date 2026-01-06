@@ -1,0 +1,8 @@
+fastmcp
+psycopg2-binary
+python-dotenv
+asyncpg
+pytz
+aiohttp
+fastapi
+uvicorn

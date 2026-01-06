@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"ana-mcp-server": {
+			"url": "http://localhost:5000/mcp/sse",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}

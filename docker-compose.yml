@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  # MCP Server (Ana - Cesto d'Amore)
+  mcp-server:
+    build: .
+    container_name: ana-mcp-server
+    ports:
+      - "8000:8000"
+    stdin_open: true
+    tty: true
+    environment:
+      # PostgreSQL Configuration
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-cestoadore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-senha123}
+      POSTGRES_DB: ${POSTGRES_DB:-cesto_damore}
+
+      # Evolution API (WhatsApp)
+      EVOLUTION_API_URL: ${EVOLUTION_API_URL}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_API_INSTANCE: ${EVOLUTION_API_INSTANCE}
+      CHAT_ID: ${CHAT_ID}
+
+      # MCP Authentication
+      MCP_API_KEY: ${MCP_API_KEY:-cesto-mcp-default-key-2026}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: cesto-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cestoadore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-senha123}
+      POSTGRES_DB: ${POSTGRES_DB:-cesto_damore}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cestoadore}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  mcp-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local

@@ -206,26 +206,43 @@ async def list_tools(api_key: str = Depends(verify_api_key)):
 
 @app.post("/call", tags=["MCP"], dependencies=[Depends(verify_api_key)])
 async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
-    """Execute an MCP tool."""
+    """Execute an MCP tool.
+    
+    Supports two input formats:
+    1. {"tool": "name", "arguments": {...}} - structured format
+    2. {"tool": "name", "param1": "value1", ...} - flat format (from n8n)
+    """
     tool_name = None
     try:
         data = await request.json()
         tool_name = data.get("tool")
-        arguments = data.get("arguments", {})
         
         if not tool_name:
             raise HTTPException(status_code=400, detail="Missing 'tool' parameter")
         
-        logger.info(f"Calling tool: {tool_name} with args: {arguments}")
+        # Check if arguments are in a separate 'arguments' object or at root level
+        if "arguments" in data:
+            # Structured format
+            arguments = data.get("arguments", {})
+        else:
+            # Flat format (from n8n) - extract arguments from root level
+            # Remove known non-argument fields
+            non_argument_keys = {
+                "tool", "sessionId", "action", "chatInput", "toolCallId",
+                "messages", "messageId", "timestamp", "metadata"
+            }
+            arguments = {k: v for k, v in data.items() if k not in non_argument_keys}
+        
+        logger.info(f"Calling tool: {tool_name}")
+        logger.info(f"Raw input keys: {list(data.keys())}")
+        logger.info(f"Arguments: {arguments}")
         
         # Get the tool function from mcp._tools
         if hasattr(mcp, "_tools") and tool_name in mcp._tools:
             tool_func = mcp._tools[tool_name]
             
             # Filter arguments to only those expected by the function
-            # This removes extra parameters like sessionId, action, chatInput, toolCallId
             if hasattr(tool_func, '__wrapped__'):
-                # If function is wrapped (by our decorator), get the original
                 actual_func = tool_func.__wrapped__
             else:
                 actual_func = tool_func
@@ -237,7 +254,11 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
             # Filter arguments to only expected parameters
             filtered_args = {k: v for k, v in arguments.items() if k in expected_params}
             
-            logger.info(f"Filtered args: {filtered_args} (removed: {set(arguments.keys()) - expected_params})")
+            removed_params = set(arguments.keys()) - expected_params
+            if removed_params:
+                logger.info(f"Removed unexpected parameters: {removed_params}")
+            
+            logger.info(f"Calling {tool_name} with filtered args: {filtered_args}")
             
             # Call the tool function with filtered arguments
             if asyncio.iscoroutinefunction(tool_func):

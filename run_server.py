@@ -205,28 +205,60 @@ async def list_tools(api_key: str = Depends(verify_api_key)):
 
 @app.post("/call", tags=["MCP"], dependencies=[Depends(verify_api_key)])
 async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
-    """Execute an MCP tool."""
+    """Execute an MCP tool - compatível com formatos do n8n, VS Code e MCP padrão.
+    
+    Suporta três formatos de entrada:
+    1. {"tool": "name", "input": {...}} - Formato n8n (2025/2026)
+    2. {"tool": "name", "arguments": {...}} - Formato MCP padrão
+    3. {"tool": "name", "param1": "value1", ...} - Formato flat (fallback)
+    """
     tool_name = None
     try:
         data = await request.json()
         tool_name = data.get("tool")
-        arguments = data.get("arguments", {})
         
         if not tool_name:
             raise HTTPException(status_code=400, detail="Missing 'tool' parameter")
-        
-        logger.info(f"Calling tool: {tool_name} with args: {arguments}")
-        
-        # Get the tool function from mcp._tools
+
+        # ── Normalização de formato ───────────────────────────────────────
+        # Prioridade: input > arguments > root level (menos conhecido)
+        if "input" in data and isinstance(data["input"], dict):
+            # Formato n8n atual: argumentos dentro de "input"
+            arguments = data["input"]
+            logger.debug(f"Using 'input' format (n8n style)")
+        elif "arguments" in data and isinstance(data["arguments"], dict):
+            # Formato padrão MCP
+            arguments = data["arguments"]
+            logger.debug(f"Using 'arguments' format (standard MCP)")
+        else:
+            # Fallback: extrai tudo que não é metadado conhecido
+            known_keys = {
+                "tool", "toolCallId", "sessionId", "action", "chatInput",
+                "message", "chatId", "pushName", "messages", "messageId",
+                "timestamp", "metadata", "input", "arguments"
+            }
+            arguments = {
+                k: v for k, v in data.items()
+                if k not in known_keys and not k.startswith("_")
+            }
+            logger.debug(f"Using root level format (fallback)")
+
+        logger.info(f"[CALL] Tool: {tool_name} | Arguments: {list(arguments.keys())}")
+        logger.debug(f"[DEBUG] Raw payload keys: {list(data.keys())}")
+        logger.debug(f"[DEBUG] Extracted arguments: {arguments}")
+
+        # ── Execução da ferramenta ────────────────────────────────────────
         if hasattr(mcp, "_tools") and tool_name in mcp._tools:
             tool_func = mcp._tools[tool_name]
-            # Call the tool function with arguments
+            
+            # Chama a ferramenta com os argumentos normalizados
             if asyncio.iscoroutinefunction(tool_func):
                 result = await tool_func(**arguments)
             else:
                 result = tool_func(**arguments)
         else:
-            raise ValueError(f"Tool '{tool_name}' not found. Available: {list(mcp._tools.keys()) if hasattr(mcp, '_tools') else 'unknown'}")
+            available_tools = list(mcp._tools.keys()) if hasattr(mcp, "_tools") else []
+            raise ValueError(f"Tool '{tool_name}' not found. Available: {available_tools}")
             
         return {
             "success": True,
@@ -236,8 +268,16 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error calling {tool_name}: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+        logger.error(f"[ERROR] Error calling {tool_name}: {type(e).__name__}: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e),
+                "type": type(e).__name__,
+                "tool": tool_name
+            }
+        )
 
 @app.get("/dashboard", tags=["Internal"])
 async def studio():

@@ -9,12 +9,38 @@ from datetime import datetime, time, timedelta
 import pytz
 import aiohttp
 from guidelines import GUIDELINES
+import inspect
+from functools import wraps
 
 # Load environment variables
 load_dotenv()
 
 # Initialize FastMCP server
 mcp = FastMCP("Ana - Cesto d'Amore")
+
+# Decorator para aceitar parâmetros extras do EasyPanel
+def mcp_tool_with_kwargs():
+    """
+    Decorator que permite que funções MCP aceitem parâmetros extras
+    enviados pelo EasyPanel (sessionId, action, chatInput, toolCallId)
+    sem rejeitar a função.
+    """
+    def decorator(func):
+        # Pega a assinatura original da função
+        sig = inspect.signature(func)
+        params = list(sig.parameters.keys())
+        
+        # Cria um wrapper que filtra os parâmetros
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Filtra kwargs para apenas aqueles que a função espera
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in params}
+            return await func(*args, **filtered_kwargs)
+        
+        # Aplica o decorator do mcp.tool()
+        return mcp.tool()(wrapper)
+    
+    return decorator
 
 # Database connection settings
 DB_CONFIG = {
@@ -258,8 +284,8 @@ def _format_support_message(
     
     return message
 
-@mcp.tool()
-async def search_guidelines(query: str, **kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def search_guidelines(query: str) -> str:
     """
     Searches the service guidelines and documentation for relevant information based on a query.
     Acts like a simple RAG (Retrieval-Augmented Generation) to find the best documentation snippet.
@@ -325,8 +351,8 @@ async def search_guidelines(query: str, **kwargs) -> str:
         
     return _format_structured_response(structured_data, humanized)
 
-@mcp.tool()
-async def get_service_guideline(category: str, **kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def get_service_guideline(category: str) -> str:
     """
     Returns specific customer service guidelines based on a category.
     Available categories: core, inexistent_products, delivery_rules, customization, 
@@ -334,8 +360,8 @@ async def get_service_guideline(category: str, **kwargs) -> str:
     """
     return GUIDELINES.get(category, f"Guidelines for '{category}' not found. Available: {', '.join(GUIDELINES.keys())}")
 
-@mcp.tool()
-async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: float = 999999, **kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: float = 999999) -> str:
     """
     Search for products in the catalog using relevance scoring and business rules.
     Returns structured JSON with product details + humanized message.
@@ -434,8 +460,8 @@ async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: flo
     finally:
         await conn.close()
 
-@mcp.tool()
-async def get_adicionais(**kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def get_adicionais() -> str:
     """
     Fetch all available add-ons (adicionais) from the Item table in the database.
     Returns structured JSON with add-ons + humanized message.
@@ -477,8 +503,8 @@ async def get_adicionais(**kwargs) -> str:
     finally:
         await conn.close()
 
-@mcp.tool()
-async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None, **kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
     """
     Validates if a delivery is possible on a given date (YYYY-MM-DD) and optional time (HH:MM).
     Returns structured JSON with validation status + humanized message.
@@ -610,8 +636,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
             f"Erro na validação: {str(e)}. Use o formato YYYY-MM-DD para data."
         )
 
-@mcp.tool()
-async def calculate_freight(city: str, payment_method: str, **kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def calculate_freight(city: str, payment_method: str) -> str:
     """
     Calculates freight based on city and payment method (pix or card).
     Returns structured JSON with freight calculation.
@@ -650,8 +676,8 @@ async def calculate_freight(city: str, payment_method: str, **kwargs) -> str:
     
     return _format_structured_response(structured_data, humanized)
 
-@mcp.tool()
-async def get_current_business_hours(**kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def get_current_business_hours() -> str:
     """
     Returns current business hours status and schedule.
     Helps LLM understand if store is open and what time closes.
@@ -704,8 +730,8 @@ async def get_current_business_hours(**kwargs) -> str:
     
     return _format_structured_response(structured_data, humanized)
 
-@mcp.tool()
-async def validate_price_manipulation(claimed_price: float, product_name: str, **kwargs) -> str:
+@mcp_tool_with_kwargs()
+async def validate_price_manipulation(claimed_price: float, product_name: str) -> str:
     """
     Validates if a customer is trying to manipulate/negotiate prices.
     LLM should use this to detect price inconsistencies.
@@ -759,14 +785,13 @@ async def validate_price_manipulation(claimed_price: float, product_name: str, *
     finally:
         await conn.close()
 
-@mcp.tool()
+@mcp_tool_with_kwargs()
 async def notify_human_support(
     reason: str,
     customer_context: Optional[str] = None,
     customer_name: Optional[str] = None,
     customer_phone: Optional[str] = None,
-    should_block_flow: bool = True,
-    **kwargs
+    should_block_flow: bool = True
 ) -> str:
     """
     Notifies human support team via WhatsApp (Evolution API) about an issue requiring intervention.

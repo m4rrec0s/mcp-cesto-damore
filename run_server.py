@@ -5,6 +5,7 @@ import json
 import logging
 import traceback
 import os
+import inspect
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -220,11 +221,29 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
         # Get the tool function from mcp._tools
         if hasattr(mcp, "_tools") and tool_name in mcp._tools:
             tool_func = mcp._tools[tool_name]
-            # Call the tool function with arguments
-            if asyncio.iscoroutinefunction(tool_func):
-                result = await tool_func(**arguments)
+            
+            # Filter arguments to only those expected by the function
+            # This removes extra parameters like sessionId, action, chatInput, toolCallId
+            if hasattr(tool_func, '__wrapped__'):
+                # If function is wrapped (by our decorator), get the original
+                actual_func = tool_func.__wrapped__
             else:
-                result = tool_func(**arguments)
+                actual_func = tool_func
+            
+            # Get function signature
+            sig = inspect.signature(actual_func)
+            expected_params = set(sig.parameters.keys())
+            
+            # Filter arguments to only expected parameters
+            filtered_args = {k: v for k, v in arguments.items() if k in expected_params}
+            
+            logger.info(f"Filtered args: {filtered_args} (removed: {set(arguments.keys()) - expected_params})")
+            
+            # Call the tool function with filtered arguments
+            if asyncio.iscoroutinefunction(tool_func):
+                result = await tool_func(**filtered_args)
+            else:
+                result = tool_func(**filtered_args)
         else:
             raise ValueError(f"Tool '{tool_name}' not found. Available: {list(mcp._tools.keys()) if hasattr(mcp, '_tools') else 'unknown'}")
             

@@ -11,40 +11,13 @@ import aiohttp
 from guidelines import GUIDELINES
 import inspect
 from functools import wraps
+from pydantic import BaseModel, ConfigDict, Field
 
 # Load environment variables
 load_dotenv()
 
 # Initialize FastMCP server
 mcp = FastMCP("Ana - Cesto d'Amore")
-
-# Decorator que registra ferramentas com Pydantic permissivo
-def mcp_tool_relaxed():
-    """
-    Decorator que registra a ferramenta no FastMCP mas com Pydantic configurado
-    para ignorar argumentos extras (extra='ignore').
-    Isso permite que o n8n injete sessionId, action, chatInput, etc sem erro.
-    """
-    def decorator(func):
-        sig = inspect.signature(func)
-        params = sig.parameters
-        param_names = list(params.keys())
-        
-        # Cria wrapper que valida e filtra argumentos
-        @wraps(func)
-        async def wrapper(**kwargs):
-            # Filtra apenas os parâmetros que a função espera
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k in param_names}
-            return await func(**filtered_kwargs)
-        
-        # Copia atributos da função original
-        wrapper.__doc__ = func.__doc__
-        wrapper.__annotations__ = func.__annotations__
-        
-        # Registra no FastMCP
-        return mcp.tool()(wrapper)
-    
-    return decorator
 
 # Database connection settings
 DB_CONFIG = {
@@ -288,13 +261,49 @@ def _format_support_message(
     
     return message
 
-@mcp_tool_relaxed()
-async def search_guidelines(query: str) -> str:
+# Definir um modelo base com extra='ignore'
+class BaseInput(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+# Modelos específicos para cada ferramenta
+class SearchGuidelinesInput(BaseInput):
+    query: str
+
+class GetServiceGuidelineInput(BaseInput):
+    category: str
+
+class SearchProductsInput(BaseInput):
+    termo: str
+    preco_minimo: float = Field(default=0)
+    preco_maximo: float = Field(default=999999)
+
+class ValidateDeliveryAvailabilityInput(BaseInput):
+    date_str: str
+    time_str: Optional[str] = None
+
+class CalculateFreightInput(BaseInput):
+    city: str
+    payment_method: str
+
+class ValidatePriceManipulationInput(BaseInput):
+    claimed_price: float
+    product_name: str
+
+class NotifyHumanSupportInput(BaseInput):
+    reason: str
+    customer_context: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    should_block_flow: bool = Field(default=True)
+
+@mcp.tool()
+async def search_guidelines(input: SearchGuidelinesInput) -> str:
     """
     Searches the service guidelines and documentation for relevant information based on a query.
     Acts like a simple RAG (Retrieval-Augmented Generation) to find the best documentation snippet.
     Returns structured JSON with matched guidelines.
     """
+    query = input.query
     import re
     # Stop words to ignore for better relevance
     STOP_WORDS = {"o", "a", "os", "as", "um", "uma", "de", "do", "da", "em", "para", "com", "no", "na", "que", "está", "procurando", "cliente"}
@@ -355,21 +364,25 @@ async def search_guidelines(query: str) -> str:
         
     return _format_structured_response(structured_data, humanized)
 
-@mcp_tool_relaxed()
-async def get_service_guideline(category: str) -> str:
+@mcp.tool()
+async def get_service_guideline(input: GetServiceGuidelineInput) -> str:
     """
     Returns specific customer service guidelines based on a category.
     Available categories: core, inexistent_products, delivery_rules, customization, 
     closing_protocol, location, mass_orders, faq_production, indecision.
     """
+    category = input.category
     return GUIDELINES.get(category, f"Guidelines for '{category}' not found. Available: {', '.join(GUIDELINES.keys())}")
 
-@mcp_tool_relaxed()
-async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: float = 999999) -> str:
+@mcp.tool()
+async def search_products(input: SearchProductsInput) -> str:
     """
     Search for products in the catalog using relevance scoring and business rules.
     Returns structured JSON with product details + humanized message.
     """
+    termo = input.termo
+    preco_minimo = input.preco_minimo
+    preco_maximo = input.preco_maximo
     conn = await get_db_connection()
     try:
         query = """
@@ -464,8 +477,8 @@ async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: flo
     finally:
         await conn.close()
 
-@mcp_tool_relaxed()
-async def get_adicionais() -> str:
+@mcp.tool()
+async def get_adicionais(input: BaseInput = BaseInput()) -> str:
     """
     Fetch all available add-ons (adicionais) from the Item table in the database.
     Returns structured JSON with add-ons + humanized message.
@@ -507,8 +520,8 @@ async def get_adicionais() -> str:
     finally:
         await conn.close()
 
-@mcp_tool_relaxed()
-async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
+@mcp.tool()
+async def validate_delivery_availability(input: ValidateDeliveryAvailabilityInput) -> str:
     """
     Validates if a delivery is possible on a given date (YYYY-MM-DD) and optional time (HH:MM).
     Returns structured JSON with validation status + humanized message.
@@ -517,6 +530,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
     Enforces 1h production time minimum.
     Rejects Sundays.
     """
+    date_str = input.date_str
+    time_str = input.time_str
     try:
         date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
         now_local = _get_local_time()
@@ -640,12 +655,14 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
             f"Erro na validação: {str(e)}. Use o formato YYYY-MM-DD para data."
         )
 
-@mcp_tool_relaxed()
-async def calculate_freight(city: str, payment_method: str) -> str:
+@mcp.tool()
+async def calculate_freight(input: CalculateFreightInput) -> str:
     """
     Calculates freight based on city and payment method (pix or card).
     Returns structured JSON with freight calculation.
     """
+    city = input.city
+    payment_method = input.payment_method
     city_norm = city.lower().strip()
     is_pix = payment_method.lower().strip() == 'pix'
     
@@ -680,8 +697,8 @@ async def calculate_freight(city: str, payment_method: str) -> str:
     
     return _format_structured_response(structured_data, humanized)
 
-@mcp_tool_relaxed()
-async def get_current_business_hours() -> str:
+@mcp.tool()
+async def get_current_business_hours(input: BaseInput = BaseInput()) -> str:
     """
     Returns current business hours status and schedule.
     Helps LLM understand if store is open and what time closes.
@@ -734,12 +751,14 @@ async def get_current_business_hours() -> str:
     
     return _format_structured_response(structured_data, humanized)
 
-@mcp_tool_relaxed()
-async def validate_price_manipulation(claimed_price: float, product_name: str) -> str:
+@mcp.tool()
+async def validate_price_manipulation(input: ValidatePriceManipulationInput) -> str:
     """
     Validates if a customer is trying to manipulate/negotiate prices.
     LLM should use this to detect price inconsistencies.
     """
+    claimed_price = input.claimed_price
+    product_name = input.product_name
     conn = await get_db_connection()
     try:
         # Search for product in database
@@ -789,13 +808,9 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     finally:
         await conn.close()
 
-@mcp_tool_relaxed()
+@mcp.tool()
 async def notify_human_support(
-    reason: str,
-    customer_context: Optional[str] = None,
-    customer_name: Optional[str] = None,
-    customer_phone: Optional[str] = None,
-    should_block_flow: bool = True
+    input: NotifyHumanSupportInput
 ) -> str:
     """
     Notifies human support team via WhatsApp (Evolution API) about an issue requiring intervention.
@@ -817,6 +832,11 @@ async def notify_human_support(
     - customer_phone: Customer phone number for contact
     - should_block_flow: Whether to block conversation flow (default: True)
     """
+    reason = input.reason
+    customer_context = input.customer_context
+    customer_name = input.customer_name
+    customer_phone = input.customer_phone
+    should_block_flow = input.should_block_flow
     
     # Format the support message
     support_message = _format_support_message(

@@ -18,26 +18,30 @@ load_dotenv()
 # Initialize FastMCP server
 mcp = FastMCP("Ana - Cesto d'Amore")
 
-# Decorator para aceitar parâmetros extras do EasyPanel
-def mcp_tool_with_kwargs():
+# Decorator que registra ferramentas com Pydantic permissivo
+def mcp_tool_relaxed():
     """
-    Decorator que permite que funções MCP aceitem parâmetros extras
-    enviados pelo EasyPanel (sessionId, action, chatInput, toolCallId)
-    sem rejeitar a função.
+    Decorator que registra a ferramenta no FastMCP mas com Pydantic configurado
+    para ignorar argumentos extras (extra='ignore').
+    Isso permite que o n8n injete sessionId, action, chatInput, etc sem erro.
     """
     def decorator(func):
-        # Pega a assinatura original da função
         sig = inspect.signature(func)
-        params = list(sig.parameters.keys())
+        params = sig.parameters
+        param_names = list(params.keys())
         
-        # Cria um wrapper que filtra os parâmetros
+        # Cria wrapper que valida e filtra argumentos
         @wraps(func)
-        async def wrapper(*args, **kwargs):
-            # Filtra kwargs para apenas aqueles que a função espera
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k in params}
-            return await func(*args, **filtered_kwargs)
+        async def wrapper(**kwargs):
+            # Filtra apenas os parâmetros que a função espera
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in param_names}
+            return await func(**filtered_kwargs)
         
-        # Aplica o decorator do mcp.tool()
+        # Copia atributos da função original
+        wrapper.__doc__ = func.__doc__
+        wrapper.__annotations__ = func.__annotations__
+        
+        # Registra no FastMCP
         return mcp.tool()(wrapper)
     
     return decorator
@@ -284,7 +288,7 @@ def _format_support_message(
     
     return message
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def search_guidelines(query: str) -> str:
     """
     Searches the service guidelines and documentation for relevant information based on a query.
@@ -351,7 +355,7 @@ async def search_guidelines(query: str) -> str:
         
     return _format_structured_response(structured_data, humanized)
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def get_service_guideline(category: str) -> str:
     """
     Returns specific customer service guidelines based on a category.
@@ -360,7 +364,7 @@ async def get_service_guideline(category: str) -> str:
     """
     return GUIDELINES.get(category, f"Guidelines for '{category}' not found. Available: {', '.join(GUIDELINES.keys())}")
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: float = 999999) -> str:
     """
     Search for products in the catalog using relevance scoring and business rules.
@@ -460,7 +464,7 @@ async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: flo
     finally:
         await conn.close()
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def get_adicionais() -> str:
     """
     Fetch all available add-ons (adicionais) from the Item table in the database.
@@ -503,7 +507,7 @@ async def get_adicionais() -> str:
     finally:
         await conn.close()
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
     """
     Validates if a delivery is possible on a given date (YYYY-MM-DD) and optional time (HH:MM).
@@ -636,7 +640,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
             f"Erro na validação: {str(e)}. Use o formato YYYY-MM-DD para data."
         )
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def calculate_freight(city: str, payment_method: str) -> str:
     """
     Calculates freight based on city and payment method (pix or card).
@@ -676,7 +680,7 @@ async def calculate_freight(city: str, payment_method: str) -> str:
     
     return _format_structured_response(structured_data, humanized)
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def get_current_business_hours() -> str:
     """
     Returns current business hours status and schedule.
@@ -730,7 +734,7 @@ async def get_current_business_hours() -> str:
     
     return _format_structured_response(structured_data, humanized)
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def validate_price_manipulation(claimed_price: float, product_name: str) -> str:
     """
     Validates if a customer is trying to manipulate/negotiate prices.
@@ -785,7 +789,7 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     finally:
         await conn.close()
 
-@mcp_tool_with_kwargs()
+@mcp_tool_relaxed()
 async def notify_human_support(
     reason: str,
     customer_context: Optional[str] = None,

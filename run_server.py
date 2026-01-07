@@ -6,6 +6,7 @@ import logging
 import traceback
 import os
 from datetime import datetime
+import time
 
 from typing import Dict, Any, List, Optional
 import inspect
@@ -15,8 +16,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
+# Configure logging with better formatting
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # Authentication configuration
@@ -24,12 +29,17 @@ API_KEY = os.getenv("MCP_API_KEY", "default-api-key-change-me")
 API_KEY_HEADER = "X-API-Key"
 
 logger.info("="*70)
-logger.info("Importing MCP server...")
+logger.info("Importando servidor MCP...")
+
+# MCP initialization flag
+mcp_initialized = False
+mcp_init_time = None
+
 try:
     from mcp_server import mcp
-    logger.info("✅ MCP imported")
+    logger.info("✅ MCP importado com sucesso")
 except Exception as e:
-    logger.error(f"❌ Failed to import MCP server: {e}")
+    logger.error(f"❌ Falha ao importar servidor MCP: {e}")
     traceback.print_exc()
     sys.exit(1)
 
@@ -53,11 +63,28 @@ mcp_app = None
 try:
     # Use SSE transport for better client compatibility (required by n8n/Easypanel)
     mcp_app = mcp.http_app(transport='sse')
-    logger.info("✅ FastMCP internal app initialized (SSE transport)")
+    logger.info("✅ Aplicação interna FastMCP inicializada (transporte SSE)")
+    mcp_initialized = True
+    mcp_init_time = datetime.now()
 except Exception as e:
-    logger.error(f"❌ Failed to initialize FastMCP app: {e}")
-    logger.debug(f"Error details: {e}", exc_info=True)
+    logger.error(f"❌ Falha ao inicializar aplicação FastMCP: {e}")
+    logger.debug(f"Detalhes do erro: {e}", exc_info=True)
     sys.exit(1)
+
+# Middleware para garantir que MCP está inicializado
+async def check_mcp_initialization(request: Request, call_next):
+    """Middleware que verifica se MCP está totalmente inicializado."""
+    if not mcp_initialized:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "error": "Servidor MCP ainda não está inicializado",
+                "status": "initializing",
+                "message": "Tente novamente em alguns segundos"
+            }
+        )
+    return await call_next(request)
 
 # Initialize our main FastAPI app with FastMCP's lifespan
 app = FastAPI(
@@ -66,6 +93,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=mcp_app.lifespan
 )
+
+# Adicionar middleware de verificação de inicialização ANTES de montar o MCP
+app.middleware("http")(check_mcp_initialization)
 
 # Mount the FastMCP app
 app.mount("/mcp", mcp_app)
@@ -146,12 +176,20 @@ async def diagnostic(api_key: str = Depends(verify_api_key)):
         if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
             tools_count = len(mcp._tool_manager._tools)
         
+        init_delay = None
+        if mcp_init_time:
+            init_delay = (datetime.now() - mcp_init_time).total_seconds()
+        
         return {
             "status": "ok",
             "service": "Ana - Cesto d'Amore MCP",
             "uptime_seconds": (datetime.now() - start_time).total_seconds(),
             "mcp_available": True,
+            "mcp_initialized": mcp_initialized,
+            "mcp_init_time": mcp_init_time.isoformat() if mcp_init_time else None,
+            "seconds_since_init": init_delay,
             "mcp_tools_count": tools_count,
+            "mcp_tools": list(mcp._tool_manager._tools.keys()) if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools") else [],
             "mcp_has_internal_app": hasattr(mcp, "http_app"),
             "cors_enabled": True,
             "timestamp": datetime.now().isoformat(),
@@ -212,6 +250,18 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
     """
     tool_name = None
     try:
+        # Verificar se MCP está inicializado
+        if not mcp_initialized:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "error": "Servidor MCP ainda não está totalmente inicializado",
+                    "error_code": "MCP_NOT_READY",
+                    "retry_after": 2
+                }
+            )
+        
         data = await request.json()
         tool_name = data.get("tool")
         
@@ -223,11 +273,11 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
         if "input" in data and isinstance(data["input"], dict):
             # Formato n8n atual: argumentos dentro de "input"
             arguments = data["input"]
-            logger.debug(f"Using 'input' format (n8n style)")
+            logger.debug(f"Usando formato 'input' (estilo n8n)")
         elif "arguments" in data and isinstance(data["arguments"], dict):
             # Formato padrão MCP
             arguments = data["arguments"]
-            logger.debug(f"Using 'arguments' format (standard MCP)")
+            logger.debug(f"Usando formato 'arguments' (MCP padrão)")
         else:
             # Fallback: extrai tudo que não é metadado conhecido
             known_keys = {
@@ -239,14 +289,19 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
                 k: v for k, v in data.items()
                 if k not in known_keys and not k.startswith("_")
             }
-            logger.debug(f"Using root level format (fallback)")
+            logger.debug(f"Usando formato root level (fallback)")
 
-        logger.info(f"[CALL] Tool: {tool_name} | Arguments: {list(arguments.keys())}")
-        logger.debug(f"[DEBUG] Raw payload keys: {list(data.keys())}")
-        logger.debug(f"[DEBUG] Extracted arguments: {arguments}")
+        logger.info(f"[CALL] Ferramenta: {tool_name} | Argumentos: {list(arguments.keys())}")
+        logger.debug(f"[DEBUG] Chaves do payload: {list(data.keys())}")
+        logger.debug(f"[DEBUG] Argumentos extraídos: {arguments}")
 
         # ── Execução da ferramenta ────────────────────────────────────────
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools") and tool_name in mcp._tool_manager._tools:
+        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
+            if tool_name not in mcp._tool_manager._tools:
+                available_tools = list(mcp._tool_manager._tools.keys())
+                logger.warning(f"Ferramenta '{tool_name}' não encontrada. Disponíveis: {available_tools}")
+                raise ValueError(f"Tool '{tool_name}' not found. Available: {available_tools}")
+            
             tool_obj = mcp._tool_manager._tools[tool_name]
             tool_func = tool_obj.fn
             
@@ -257,7 +312,8 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
             # Filter arguments to only include allowed parameters
             filtered_args = {k: v for k, v in arguments.items() if k in allowed_params}
             
-            logger.debug(f"[DEBUG] Filtered arguments for {tool_name}: {list(filtered_args.keys())}")
+            logger.debug(f"[DEBUG] Argumentos filtrados para {tool_name}: {list(filtered_args.keys())}")
+            logger.debug(f"[DEBUG] Argumentos não utilizados: {set(arguments.keys()) - set(filtered_args.keys())}")
             
             # Chama a ferramenta com os argumentos normalizados
             if asyncio.iscoroutinefunction(tool_func):
@@ -276,14 +332,21 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[ERROR] Error calling {tool_name}: {type(e).__name__}: {str(e)}", exc_info=True)
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(f"[ERROR] Erro ao chamar ferramenta {tool_name}: {error_type}: {error_msg}", exc_info=True)
+        
+        # Retornar erro com mais informações para debug
         return JSONResponse(
-            status_code=500,
+            status_code=400 if error_type == "ValueError" else 500,
             content={
                 "success": False,
-                "error": str(e),
-                "type": type(e).__name__,
-                "tool": tool_name
+                "error": error_msg,
+                "error_type": error_type,
+                "tool": tool_name,
+                "timestamp": datetime.now().isoformat(),
+                "mcp_initialized": mcp_initialized,
+                "hint": "Verifique se a ferramenta existe e se os argumentos estão corretos"
             }
         )
 

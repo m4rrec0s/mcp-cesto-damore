@@ -149,7 +149,7 @@ Entregamos em Campina Grande e cidades vizinhas até 20 km 📍
 ### 1. Sondagem (Assistente de Escolha)
 - Verifique se o cliente já mencionou a **ocasião** (aniversário, namorados, etc).
 - Se não mencionou, pergunte a ocasião primeiro.
-- Se a ocasião estiver clara, mostre 2 opções usando `search_products`.
+- Se a ocasião estiver clara, mostre 2 opções usando `consultarCatalogo`.
 
 ### 2. Priorização e Apresentação
 - **Limites:** Apresente sempre 2 opções por vez.

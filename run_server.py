@@ -48,12 +48,27 @@ async def verify_api_key(x_api_key: str = Header(None)) -> str:
         )
     return x_api_key
 
-# Initialize our main FastAPI app
+# Initialize FastMCP app first to get lifespan
+mcp_app = None
+try:
+    # Use SSE transport for better client compatibility (required by n8n/Easypanel)
+    mcp_app = mcp.http_app(transport='sse')
+    logger.info("✅ FastMCP internal app initialized (SSE transport)")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize FastMCP app: {e}")
+    logger.debug(f"Error details: {e}", exc_info=True)
+    sys.exit(1)
+
+# Initialize our main FastAPI app with FastMCP's lifespan
 app = FastAPI(
     title="Ana - Cesto d'Amore MCP Server",
     description="MCP Server for n8n and Cesto d'Amore integration",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=mcp_app.lifespan
 )
+
+# Mount the FastMCP app
+app.mount("/mcp", mcp_app)
 
 # Add CORS middleware
 app.add_middleware(
@@ -65,25 +80,6 @@ app.add_middleware(
 
 # Initialize start time
 start_time = datetime.now()
-
-# Mount FastMCP's internal app for SSE support
-# FastMCP supports 'http', 'streamable-http', and 'sse' transports
-# We use 'sse' for Server-Sent Events which is required for SSE clients
-try:
-    # Use SSE transport for better client compatibility
-    mcp_app = mcp.http_app()
-    app.mount("/mcp", mcp_app)
-    logger.info("✅ FastMCP internal app mounted at /mcp with HTTP transport")
-except Exception as e:
-    logger.error(f"⚠️ Could not mount FastMCP internal app: {e}")
-    logger.debug(f"Error details: {e}", exc_info=True)
-    # Fallback to default HTTP transport
-    try:
-        mcp_app = mcp.http_app()
-        app.mount("/mcp", mcp_app)
-        logger.info("✅ FastMCP internal app mounted at /mcp (default transport)")
-    except Exception as e2:
-        logger.error(f"❌ Failed to mount FastMCP app: {e2}")
 
 # Add error handler for better debugging
 @app.exception_handler(Exception)

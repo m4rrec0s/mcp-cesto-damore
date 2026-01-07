@@ -6,7 +6,9 @@ import logging
 import traceback
 import os
 from datetime import datetime
+
 from typing import Dict, Any, List, Optional
+import inspect
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -69,9 +71,9 @@ start_time = datetime.now()
 # We use 'sse' for Server-Sent Events which is required for SSE clients
 try:
     # Use SSE transport for better client compatibility
-    mcp_app = mcp.http_app(transport='sse')
+    mcp_app = mcp.http_app()
     app.mount("/mcp", mcp_app)
-    logger.info("✅ FastMCP internal app mounted at /mcp with SSE transport")
+    logger.info("✅ FastMCP internal app mounted at /mcp with HTTP transport")
 except Exception as e:
     logger.error(f"⚠️ Could not mount FastMCP internal app: {e}")
     logger.debug(f"Error details: {e}", exc_info=True)
@@ -145,8 +147,8 @@ async def diagnostic(api_key: str = Depends(verify_api_key)):
     """Diagnostic endpoint - check all systems."""
     try:
         tools_count = 0
-        if hasattr(mcp, "_tools"):
-            tools_count = len(mcp._tools)
+        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
+            tools_count = len(mcp._tool_manager._tools)
         
         return {
             "status": "ok",
@@ -186,9 +188,9 @@ async def list_tools(api_key: str = Depends(verify_api_key)):
         tools_list = []
         
         # Get tools using FastMCP internal access
-        if hasattr(mcp, "_tools"):
+        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
             # Direct access to tools dict
-            tools_list = [name for name in mcp._tools.keys() if not name.startswith('_')]
+            tools_list = [name for name in mcp._tool_manager._tools.keys() if not name.startswith('_')]
         
         # If we couldn't get tools, try other methods
         if not tools_list:
@@ -248,16 +250,26 @@ async def call_tool(request: Request, api_key: str = Depends(verify_api_key)):
         logger.debug(f"[DEBUG] Extracted arguments: {arguments}")
 
         # ── Execução da ferramenta ────────────────────────────────────────
-        if hasattr(mcp, "_tools") and tool_name in mcp._tools:
-            tool_func = mcp._tools[tool_name]
+        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools") and tool_name in mcp._tool_manager._tools:
+            tool_obj = mcp._tool_manager._tools[tool_name]
+            tool_func = tool_obj.fn
+            
+            # Inspect tool function to get allowed parameters
+            sig = inspect.signature(tool_func)
+            allowed_params = set(sig.parameters.keys())
+            
+            # Filter arguments to only include allowed parameters
+            filtered_args = {k: v for k, v in arguments.items() if k in allowed_params}
+            
+            logger.debug(f"[DEBUG] Filtered arguments for {tool_name}: {list(filtered_args.keys())}")
             
             # Chama a ferramenta com os argumentos normalizados
             if asyncio.iscoroutinefunction(tool_func):
-                result = await tool_func(**arguments)
+                result = await tool_func(**filtered_args)
             else:
-                result = tool_func(**arguments)
+                result = tool_func(**filtered_args)
         else:
-            available_tools = list(mcp._tools.keys()) if hasattr(mcp, "_tools") else []
+            available_tools = list(mcp._tool_manager._tools.keys()) if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools") else []
             raise ValueError(f"Tool '{tool_name}' not found. Available: {available_tools}")
             
         return {

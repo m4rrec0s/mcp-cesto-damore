@@ -11,7 +11,10 @@ import aiohttp
 from guidelines import GUIDELINES
 
 # Load environment variables
-load_dotenv()
+# Load environment variables
+from pathlib import Path
+project_dir = Path(__file__).parent
+load_dotenv(dotenv_path=project_dir / '.env')
 
 # Initialize FastMCP server
 mcp = FastMCP("Ana - Cesto d'Amore")
@@ -265,7 +268,7 @@ async def search_guidelines(query: str) -> str:
     Acts like a simple RAG (Retrieval-Augmented Generation) to find the best documentation snippet.
     Returns structured JSON with matched guidelines.
     """
-    query = input.query
+    # query = input.query  <-- REMOVED: Use argument directly
     import re
     # Stop words to ignore for better relevance
     STOP_WORDS = {"o", "a", "os", "as", "um", "uma", "de", "do", "da", "em", "para", "com", "no", "na", "que", "está", "procurando", "cliente"}
@@ -333,7 +336,7 @@ async def get_service_guideline(category: str) -> str:
     Available categories: core, inexistent_products, delivery_rules, customization, 
     closing_protocol, location, mass_orders, faq_production, indecision.
     """
-    category = input.category
+    # category = input.category  <-- REMOVED: Use argument directly
     return GUIDELINES.get(category, f"Guidelines for '{category}' not found. Available: {', '.join(GUIDELINES.keys())}")
 
 @mcp.tool()
@@ -342,9 +345,9 @@ async def search_products(termo: str, preco_minimo: float = 0, preco_maximo: flo
     Search for products in the catalog using relevance scoring and business rules.
     Returns structured JSON with product details + humanized message.
     """
-    termo = input.termo
-    preco_minimo = input.preco_minimo
-    preco_maximo = input.preco_maximo
+    # termo = input.termo
+    # preco_minimo = input.preco_minimo
+    # preco_maximo = input.preco_maximo
     conn = await get_db_connection()
     try:
         query = """
@@ -492,8 +495,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
     Enforces 1h production time minimum.
     Rejects Sundays.
     """
-    date_str = input.date_str
-    time_str = input.time_str
+    # date_str = input.date_str
+    # time_str = input.time_str
     try:
         date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
         now_local = _get_local_time()
@@ -623,8 +626,8 @@ async def calculate_freight(city: str, payment_method: str) -> str:
     Calculates freight based on city and payment method (pix or card).
     Returns structured JSON with freight calculation.
     """
-    city = input.city
-    payment_method = input.payment_method
+    # city = input.city
+    # payment_method = input.payment_method
     city_norm = city.lower().strip()
     is_pix = payment_method.lower().strip() == 'pix'
     
@@ -719,8 +722,8 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     Validates if a customer is trying to manipulate/negotiate prices.
     LLM should use this to detect price inconsistencies.
     """
-    claimed_price = input.claimed_price
-    product_name = input.product_name
+    # claimed_price = input.claimed_price
+    # product_name = input.product_name
     conn = await get_db_connection()
     try:
         # Search for product in database

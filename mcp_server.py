@@ -221,40 +221,26 @@ def _format_support_message(
     nome = customer_name or "Desconhecido"
     numero = customer_phone or "Sem contato"
     
+    # Standard header
+    header = f"*AJUDA [{emoji}] - Cliente {nome} - {numero}*"
+    
+    # Reason and description
     reason_lower = reason.lower()
-    reason_descriptions = {
-        "price_manipulation": "Cliente tentando negociar/reduzir preco",
-        "product_unavailable": "Produto solicitado nao esta no catalogo",
-        "complex_customization": "Solicitacao de personalizacao complexa",
-        "end_of_checkout": "Finalizacao de compra - aguardando confirmacao de pagamento",
-        "finalizacao_pedido": "Finalizacao de compra - aguardando confirmacao de pagamento",
-        "customer_insistence": "Cliente insistindo apos multiplas recusas",
-        "technical_error": "Erro tecnico no sistema",
-        "freight_doubt": "Duvida sobre frete e entrega",
-    }
-    
-    # Try to find a match or use the reason as is if describing a finalization
-    descricao = reason_descriptions.get(reason_lower)
-    if not descricao:
-        if "finaliza" in reason_lower:
-            descricao = "Finalizacao de compra - aguardando atendimento humano"
-        else:
-            descricao = f"Acionamento: {reason}"
-    
-    if customer_context:
-        # Clean up the context string (sometimes LLM might send it as a stringified dict)
-        if customer_context.startswith("{") and customer_context.endswith("}"):
-            try:
-                # Try to format it if it looks like JSON
-                ctx_dict = json.loads(customer_context)
-                cleaned_ctx = "\n".join([f"{k}: {v}" for k, v in ctx_dict.items()])
-                descricao += f"\n\nContexto:\n{cleaned_ctx}"
-            except:
-                descricao += f"\n\nContexto: {customer_context}"
-        else:
-            descricao += f"\n\nContexto: {customer_context}"
-    
-    message = f"*AJUDA [{emoji}] - Cliente {nome} - {numero}*\n{descricao}"
+    if "finaliza" in reason_lower or "pedido" in reason_lower:
+        descricao = "✅ Pedido pronto para finalização humana."
+    elif "frete" in reason_lower:
+        descricao = "🚚 Dúvida ou confirmação de frete."
+    else:
+        descricao = f"Acionamento: {reason}"
+
+    # Context formatting
+    if customer_context and customer_context.strip().lower() != "none":
+        # Clean up and ensure formatting
+        contexto = customer_context.strip()
+        message = f"{header}\n{descricao}\n\n{contexto}"
+    else:
+        message = f"{header}\n{descricao}\n\n⚠️ Contexto não fornecido pela IA."
+        
     return message
 
 @mcp.tool()
@@ -672,10 +658,34 @@ async def get_active_holidays() -> str:
 
 @mcp.tool()
 async def calculate_freight(city: str, payment_method: str) -> str:
-    """Calculates freight."""
-    is_pix = payment_method.lower().strip() == 'pix'
-    val = 0.0 if "campina" in city.lower() and is_pix else 10.0
-    return f"Frete para {city}: R$ {val:.2f}"
+    """
+    Calcula o frete com base na cidade e método de pagamento.
+    Regras:
+    - Campina Grande: PIX = R$ 0.00 | Cartão = R$ 10.00
+    - Cidades Vizinhas: PIX = R$ 15.00 | Cartão = Valor definido pelo atendente
+    """
+    city_lower = city.lower().strip()
+    method_lower = payment_method.lower().strip()
+    is_pix = method_lower == 'pix'
+    
+    # Cidades vizinhas comuns
+    neighbors = ["puxinanã", "lagoa seca", "queimadas", "massaranduba", "lagoa de roça", "esperança"]
+    is_neighbor = any(n in city_lower for n in neighbors)
+    
+    if "campina" in city_lower:
+        val = 0.0 if is_pix else 10.0
+        return f"Frete para {city}: R$ {val:.2f}"
+    elif is_neighbor:
+        if is_pix:
+            return f"Frete para {city}: R$ 15.00"
+        else:
+            return f"Frete para {city}: O valor para pagamento no cartão em cidades vizinhas é repassado pelo atendente humano no fim do atendimento. 🤝"
+    else:
+        # Fallback para outras cidades ou se não identificado
+        if is_pix:
+            return f"Frete para {city}: R$ 15.00 (Valor padrão para região metropolitana)"
+        else:
+            return f"Frete para {city}: O valor do frete para {city} será confirmado pelo atendente humano. 🤝"
 
 @mcp.tool()
 async def get_current_business_hours() -> str:

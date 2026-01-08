@@ -3,6 +3,7 @@ import asyncio
 import json
 import sys
 import re
+import time
 from typing import Optional, List, Dict, Any, Union
 from fastmcp import FastMCP
 import asyncpg
@@ -57,15 +58,29 @@ BUSINESS_HOURS = {
     "sunday": [],  # Closed
 }
 
+# Global pool variable
+db_pool = None
+
+async def get_db_pool():
+    """Get or create a database connection pool."""
+    global db_pool
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(
+            host=DB_CONFIG["host"],
+            port=int(DB_CONFIG["port"]) if DB_CONFIG["port"] else 5432,
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            database=DB_CONFIG["database"],
+            min_size=2,
+            max_size=10,
+            command_timeout=30
+        )
+    return db_pool
+
 async def get_db_connection():
-    """Create a connection to the Postgres database."""
-    return await asyncpg.connect(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        database=DB_CONFIG["database"]
-    )
+    """Deprecated: Use db_pool instead. Keeping for compatibility."""
+    pool = await get_db_pool()
+    return await pool.acquire()
 
 def _get_local_time():
     """Get current time in Campina Grande timezone."""
@@ -291,125 +306,119 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     Consulta o catálogo de cestas com lógica de EXATO > FALLBACK.
     Retorna TOP 6 produtos com ranking, is_exact_match e tipo_resultado.
     
-    A IA DEVE:
-    1. Filtrar APENAS produtos com tipo_resultado = "EXATO" (contêm o termo)
-    2. Ordenar por ranking (menor = melhor)
-    3. Selecionar 2 primeiros EXATOS
-    4. Se <2 EXATOS, completar com FALLBACK
-    
     Args:
         termo: Search term (ocasião, item, produto)
         precoMinimo: Minimum price (default 0)
         precoMaximo: Maximum price (default 999999)
         exclude_product_ids: IDs já enviados (para evitar repetição)
     """
-    conn = await get_db_connection()
-    try:
-        # Parse exclude IDs
-        exclude_ids = exclude_product_ids if exclude_product_ids else []
-        exclude_ids = [str(id) for id in exclude_ids]
-        
-        query = """
-        WITH input_params AS (
-            SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
-        ),
-        products_scored AS (
-          SELECT p.id, p.name, p.description, p.price, p.image_url,
-          (
-            -- Name exact match (highest priority = 100)
-            (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
-            -- Description/Tags content match (medium priority = 50)
-            (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
-            -- Word-boundary matches in tags (lower priority = 30)
-            (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
-          ) as relevance_score,
-          -- is_exact_match: score >= 50 means term is explicitly in name or description
-          (CASE WHEN 
-            p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
-            p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
-           THEN true ELSE false END) as is_exact_match
-          FROM public."Product" p
-          WHERE p.price >= (SELECT preco_minimo FROM input_params) 
-            AND p.price <= (SELECT preco_maximo FROM input_params)
-            AND p.is_active = true
-            AND NOT (p.id::TEXT = ANY($4::TEXT[]))
-        )
-        SELECT 
-          id, name, description, price, image_url, relevance_score, is_exact_match,
-          ROW_NUMBER() OVER (PARTITION BY is_exact_match ORDER BY relevance_score DESC, price DESC) as ranking
-        FROM products_scored 
-        WHERE relevance_score > 0
-        ORDER BY is_exact_match DESC, ranking ASC
-        LIMIT 6;
-        """
-        
-        _safe_print(f"🔍 consultarCatalogo: termo='{termo}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
-        
-        start_time = time.time()
-        rows = await conn.fetch(query, termo, precoMaximo, precoMinimo, exclude_ids)
-        duration = time.time() - start_time
-        _safe_print(f"⏱️ query levaram {duration:.2f}s")
-        
-        if not rows:
-            return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
-        
-        # Separate exact matches from fallback
-        exact_matches = [r for r in rows if r['is_exact_match']]
-        fallback_matches = [r for r in rows if not r['is_exact_match']]
-        
-        # Structure results for LLM consumption
-        structured = {
-            "status": "found" if rows else "not_found",
-            "termo": termo,
-            "exatos": [
-                {
-                    "ranking": i + 1,
-                    "id": str(r['id']),
-                    "nome": r['name'],
-                    "preco": float(r['price']),
-                    "descricao": r['description'],
-                    "imagem": r['image_url'],
-                    "tipo_resultado": "EXATO",
-                    "relevance_score": int(r['relevance_score'])
-                }
-                for i, r in enumerate(exact_matches)
-            ],
-            "fallback": [
-                {
-                    "ranking": i + 1,
-                    "id": str(r['id']),
-                    "nome": r['name'],
-                    "preco": float(r['price']),
-                    "descricao": r['description'],
-                    "imagem": r['image_url'],
-                    "tipo_resultado": "FALLBACK",
-                    "relevance_score": int(r['relevance_score'])
-                }
-                for i, r in enumerate(fallback_matches)
-            ]
-        }
-        
-        # Log results
-        for r in rows:
-            tipo = "EXATO" if r['is_exact_match'] else "FALLBACK"
-            _safe_print(f"  ✅ [{tipo}] Ranking {r['ranking']}: {r['name']} - R$ {r['price']:.2f}")
-        
-        # Return JSON for LLM to parse
-        return json.dumps(structured, ensure_ascii=False)
-    finally:
-        await conn.close()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Parse exclude IDs
+            exclude_ids = exclude_product_ids if exclude_product_ids else []
+            exclude_ids = [str(id) for id in exclude_ids]
+            
+            query = """
+            WITH input_params AS (
+                SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
+            ),
+            products_scored AS (
+              SELECT p.id, p.name, p.description, p.price, p.image_url,
+              (
+                -- Name exact match (highest priority = 100)
+                (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
+                -- Description/Tags content match (medium priority = 50)
+                (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
+                -- Word-boundary matches in tags (lower priority = 30)
+                (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
+              ) as relevance_score,
+              -- is_exact_match: score >= 50 means term is explicitly in name or description
+              (CASE WHEN 
+                p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
+                p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
+               THEN true ELSE false END) as is_exact_match
+              FROM public."Product" p
+              WHERE p.price >= (SELECT preco_minimo FROM input_params) 
+                AND p.price <= (SELECT preco_maximo FROM input_params)
+                AND p.is_active = true
+                AND NOT (p.id::TEXT = ANY($4::TEXT[]))
+            )
+            SELECT 
+              id, name, description, price, image_url, relevance_score, is_exact_match,
+              ROW_NUMBER() OVER (PARTITION BY is_exact_match ORDER BY relevance_score DESC, price DESC) as ranking
+            FROM products_scored 
+            WHERE relevance_score > 0
+            ORDER BY is_exact_match DESC, ranking ASC
+            LIMIT 6;
+            """
+            
+            _safe_print(f"🔍 consultarCatalogo: termo='{termo}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
+            
+            start_time = time.time()
+            rows = await conn.fetch(query, termo, precoMaximo, precoMinimo, exclude_ids)
+            duration = time.time() - start_time
+            _safe_print(f"⏱️ query levaram {duration:.2f}s")
+            
+            if not rows:
+                return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
+            
+            # Separate exact matches from fallback
+            exact_matches = [r for r in rows if r['is_exact_match']]
+            fallback_matches = [r for r in rows if not r['is_exact_match']]
+            
+            # Structure results for LLM consumption
+            structured = {
+                "status": "found" if rows else "not_found",
+                "termo": termo,
+                "exatos": [
+                    {
+                        "ranking": i + 1,
+                        "id": str(r['id']),
+                        "nome": r['name'],
+                        "preco": float(r['price']),
+                        "descricao": r['description'],
+                        "imagem": r['image_url'],
+                        "tipo_resultado": "EXATO",
+                        "relevance_score": int(r['relevance_score'])
+                    }
+                    for i, r in enumerate(exact_matches)
+                ],
+                "fallback": [
+                    {
+                        "ranking": i + 1,
+                        "id": str(r['id']),
+                        "nome": r['name'],
+                        "preco": float(r['price']),
+                        "descricao": r['description'],
+                        "imagem": r['image_url'],
+                        "tipo_resultado": "FALLBACK",
+                        "relevance_score": int(r['relevance_score'])
+                    }
+                    for i, r in enumerate(fallback_matches)
+                ]
+            }
+            
+            # Log results
+            for r in rows:
+                tipo = "EXATO" if r['is_exact_match'] else "FALLBACK"
+                _safe_print(f"  ✅ [{tipo}] Ranking {r['ranking']}: {r['name']} - R$ {r['price']:.2f}")
+            
+            # Return JSON for LLM to parse
+            return json.dumps(structured, ensure_ascii=False)
+        except Exception as e:
+            _safe_print(f"❌ Erro em consultarCatalogo: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
 async def get_adicionais() -> str:
     """Fetch all available add-ons (adicionais)."""
-    conn = await get_db_connection()
-    try:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT name, base_price as price, description, image_url FROM public."Item" WHERE type = \'ADDITIONAL\'')
         adicionais = [{"name": r['name'], "price": float(r['price']), "description": r['description'], "image_url": r['image_url']} for r in rows]
         humanized = "✨ PARA TORNAR AINDA MAIS ESPECIAL:\n\n" + "".join([f"{i['name']} - R$ {i['price']:.2f}\n" for i in adicionais])
         return _format_structured_response({"status": "found", "adicionais": adicionais}, humanized)
-    finally:
-        await conn.close()
 
 @mcp.tool()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
@@ -588,8 +597,8 @@ async def get_active_holidays() -> str:
     Returns list of active holidays/closures from database.
     Returns formatted message with dates when shop is closed.
     """
-    conn = await get_db_connection()
-    try:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
         query = """
         SELECT name, start_date, end_date, closure_type, duration_hours
         FROM public."Holiday"
@@ -636,8 +645,6 @@ async def get_active_holidays() -> str:
             {"status": "found", "holidays": holidays},
             humanized
         )
-    finally:
-        await conn.close()
 
 @mcp.tool()
 async def calculate_freight(city: str, payment_method: str) -> str:
@@ -670,23 +677,22 @@ async def save_customer_summary(customer_phone: str, summary: str) -> str:
     The summary should contain important details like preferences, allergies, or special dates.
     This memory expires in 15 days.
     """
-    conn = await get_db_connection()
-    try:
-        expires_at = datetime.now() + timedelta(days=15)
-        query = """
-        INSERT INTO public."CustomerMemory" (id, customer_phone, summary, updated_at, expires_at)
-        VALUES (gen_random_uuid(), $1, $2, NOW(), $3)
-        ON CONFLICT (customer_phone) DO UPDATE 
-        SET summary = $2, updated_at = NOW(), expires_at = $3
-        RETURNING id;
-        """
-        row = await conn.fetchrow(query, customer_phone, summary, expires_at)
-        structured_data = {"status": "success", "customer_phone": customer_phone, "memory_id": str(row['id'])}
-        return _format_structured_response(structured_data, f"Memória atualizada para {customer_phone}.")
-    except Exception as e:
-        return f"Erro: {str(e)}"
-    finally:
-        await conn.close()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            expires_at = datetime.now() + timedelta(days=15)
+            query = """
+            INSERT INTO public."CustomerMemory" (id, customer_phone, summary, updated_at, expires_at)
+            VALUES (gen_random_uuid(), $1, $2, NOW(), $3)
+            ON CONFLICT (customer_phone) DO UPDATE 
+            SET summary = $2, updated_at = NOW(), expires_at = $3
+            RETURNING id;
+            """
+            row = await conn.fetchrow(query, customer_phone, summary, expires_at)
+            structured_data = {"status": "success", "customer_phone": customer_phone, "memory_id": str(row['id'])}
+            return _format_structured_response(structured_data, f"Memória atualizada para {customer_phone}.")
+        except Exception as e:
+            return f"Erro: {str(e)}"
 
 # ============================================================================
 # PROMPTS: Instruções para padronizar comportamento da IA com as Tools

@@ -3,7 +3,7 @@ import asyncio
 import json
 import sys
 import re
-import time
+import time as lib_time
 from typing import Optional, List, Dict, Any, Union
 from fastmcp import FastMCP
 import asyncpg
@@ -98,9 +98,11 @@ def _safe_print(message: str) -> None:
     """
     Safe print that handles Unicode errors gracefully by writing to stderr.
     Writes to stderr to avoid breaking the MCP stdio protocol (which uses stdout).
+    Prepends timestamp in Campina Grande timezone.
     """
     try:
-        sys.stderr.write(message + "\n")
+        now = datetime.now(pytz.timezone("America/Fortaleza")).strftime("%Y-%m-%d %H:%M:%S")
+        sys.stderr.write(f"[{now}] {message}\n")
         sys.stderr.flush()
     except:
         pass
@@ -355,9 +357,9 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             
             _safe_print(f"🔍 consultarCatalogo: termo='{termo}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
             
-            start_time = time.time()
+            start_time = lib_time.time()
             rows = await conn.fetch(query, termo, precoMaximo, precoMinimo, exclude_ids)
-            duration = time.time() - start_time
+            duration = lib_time.time() - start_time
             _safe_print(f"⏱️ query levaram {duration:.2f}s")
             
             if not rows:
@@ -596,17 +598,20 @@ async def get_active_holidays() -> str:
     """
     Returns list of active holidays/closures from database.
     Returns formatted message with dates when shop is closed.
+    Always uses America/Fortaleza time for reference.
     """
     pool = await get_db_pool()
+    now_local = _get_local_time()
     async with pool.acquire() as conn:
+        # Use local date to avoid VPS timezone issues
         query = """
         SELECT name, start_date, end_date, closure_type, duration_hours
         FROM public."Holiday"
         WHERE is_active = true
-        AND start_date >= CURRENT_DATE - INTERVAL '1 day'
+        AND start_date >= $1::DATE - INTERVAL '1 day'
         ORDER BY start_date ASC;
         """
-        rows = await conn.fetch(query)
+        rows = await conn.fetch(query, now_local.date())
         if not rows:
             return _format_structured_response(
                 {"status": "no_holidays"},
@@ -655,8 +660,28 @@ async def calculate_freight(city: str, payment_method: str) -> str:
 
 @mcp.tool()
 async def get_current_business_hours() -> str:
-    """Returns business hours."""
-    return "Aberto até as 17:00."
+    """
+    Returns the business hours for today and the current status (open/closed).
+    Always returns hours in America/Fortaleza (Campina Grande) timezone.
+    """
+    now = _get_local_time()
+    day_num = now.weekday()
+    day_key = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][day_num]
+    hours = BUSINESS_HOURS.get(day_key, [])
+    
+    if not hours:
+        return "Hoje (domingo) não abrimos para produção, mas estamos anotando pedidos para amanhã! ❤️"
+        
+    hours_fmt = " e das ".join([f"{s.strftime('%H:%M')} às {e.strftime('%H:%M')}" for s, e in hours])
+    status = "Abertos"
+    
+    # Check if currently open
+    current_time = now.time()
+    is_open = any(s <= current_time <= e for s, e in hours)
+    if not is_open:
+        status = "Fechados no momento"
+        
+    return f"Nosso horário para hoje ({day_key}) é: {hours_fmt}. Status: {status} ✅"
 
 @mcp.tool()
 async def validate_price_manipulation(claimed_price: float, product_name: str) -> str:
@@ -678,17 +703,19 @@ async def save_customer_summary(customer_phone: str, summary: str) -> str:
     This memory expires in 15 days.
     """
     pool = await get_db_pool()
+    now_local = _get_local_time()
     async with pool.acquire() as conn:
         try:
-            expires_at = datetime.now() + timedelta(days=15)
+            # Consistent with America/Fortaleza
+            expires_at = now_local + timedelta(days=15)
             query = """
             INSERT INTO public."CustomerMemory" (id, customer_phone, summary, updated_at, expires_at)
-            VALUES (gen_random_uuid(), $1, $2, NOW(), $3)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4)
             ON CONFLICT (customer_phone) DO UPDATE 
-            SET summary = $2, updated_at = NOW(), expires_at = $3
+            SET summary = $2, updated_at = $3, expires_at = $4
             RETURNING id;
             """
-            row = await conn.fetchrow(query, customer_phone, summary, expires_at)
+            row = await conn.fetchrow(query, customer_phone, summary, now_local, expires_at)
             structured_data = {"status": "success", "customer_phone": customer_phone, "memory_id": str(row['id'])}
             return _format_structured_response(structured_data, f"Memória atualizada para {customer_phone}.")
         except Exception as e:

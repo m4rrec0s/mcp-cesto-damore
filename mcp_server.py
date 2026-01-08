@@ -345,7 +345,10 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
         
         _safe_print(f"🔍 consultarCatalogo: termo='{termo}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
         
+        start_time = time.time()
         rows = await conn.fetch(query, termo, precoMaximo, precoMinimo, exclude_ids)
+        duration = time.time() - start_time
+        _safe_print(f"⏱️ query levaram {duration:.2f}s")
         
         if not rows:
             return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"

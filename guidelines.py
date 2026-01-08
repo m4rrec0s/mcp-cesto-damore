@@ -129,7 +129,7 @@ Frete: R$ [Valor]
 ### Finalização
 Após notificar e bloquear, informe:
 "Perfeito! Já passei todos os detalhes para o nosso time humano. Como agora eles vão cuidar do seu pagamento e personalização, eu vou me retirar para não atrapalhar, tá ok? Logo eles te respondem! Obrigadaaa ❤️🥰"
-"""
+""",
 
     "indecision": """## Lidando com Indecisão
 - Apresente sempre 2 opções por vez.

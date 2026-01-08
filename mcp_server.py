@@ -112,16 +112,17 @@ def _get_emoji_for_reason(reason: str) -> str:
     Map support reason to emoji indicator.
     🔴 = Critical (product unavailable, customization, price manipulation)
     🟡 = Medium (freight doubts)
-    🟢 = Success (checkout completion)
+    🟢 = Success (checkout completion/finalization)
     """
     reason_lower = reason.lower()
     
-    if reason_lower in ["end_of_checkout"]:
+    # Check for finalization keywords
+    if any(kw in reason_lower for kw in ["finaliza", "paga", "compra", "pedido", "checkout", "concluído"]):
         return "🟢"
-    elif reason_lower in ["freight_doubt"]:
+    elif "frete" in reason_lower or "duvida" in reason_lower:
         return "🟡"
     else:
-        # Default: critical issues
+        # Default: issues requiring attention
         return "🔴"
 
 async def _send_whatsapp_notification(
@@ -226,14 +227,32 @@ def _format_support_message(
         "product_unavailable": "Produto solicitado nao esta no catalogo",
         "complex_customization": "Solicitacao de personalizacao complexa",
         "end_of_checkout": "Finalizacao de compra - aguardando confirmacao de pagamento",
+        "finalizacao_pedido": "Finalizacao de compra - aguardando confirmacao de pagamento",
         "customer_insistence": "Cliente insistindo apos multiplas recusas",
         "technical_error": "Erro tecnico no sistema",
         "freight_doubt": "Duvida sobre frete e entrega",
     }
     
-    descricao = reason_descriptions.get(reason_lower, f"Acionamento: {reason}")
+    # Try to find a match or use the reason as is if describing a finalization
+    descricao = reason_descriptions.get(reason_lower)
+    if not descricao:
+        if "finaliza" in reason_lower:
+            descricao = "Finalizacao de compra - aguardando atendimento humano"
+        else:
+            descricao = f"Acionamento: {reason}"
+    
     if customer_context:
-        descricao += f"\n\nContexto: {customer_context}"
+        # Clean up the context string (sometimes LLM might send it as a stringified dict)
+        if customer_context.startswith("{") and customer_context.endswith("}"):
+            try:
+                # Try to format it if it looks like JSON
+                ctx_dict = json.loads(customer_context)
+                cleaned_ctx = "\n".join([f"{k}: {v}" for k, v in ctx_dict.items()])
+                descricao += f"\n\nContexto:\n{cleaned_ctx}"
+            except:
+                descricao += f"\n\nContexto: {customer_context}"
+        else:
+            descricao += f"\n\nContexto: {customer_context}"
     
     message = f"*AJUDA [{emoji}] - Cliente {nome} - {numero}*\n{descricao}"
     return message
@@ -689,11 +708,63 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     return "Preço validado."
 
 @mcp.tool()
-async def notify_human_support(reason: str, customer_context: dict = None, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True) -> str:
-    """Notifies human support."""
-    support_message = _format_support_message(reason, str(customer_context), customer_name, customer_phone)
+async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True) -> str:
+    """
+    Notifica o suporte humano via WhatsApp com o contexto completo do pedido.
+    
+    Args:
+        reason: Motivo claro (ex: "Finalização de Pedido", "Dúvida sobre Frete")
+        customer_context: Texto detalhado com itens, valores, data de entrega e endereço.
+        customer_name: Nome do cliente.
+        customer_phone: Telefone do cliente.
+        should_block_flow: Se deve encerrar o atendimento automático (default: True).
+    """
+    support_message = _format_support_message(reason, customer_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
-    return "Notificação enviada."
+    return "Notificação enviada com sucesso para o time humano. ✅"
+
+@mcp.tool()
+async def math_calculator(expression: str) -> str:
+    """
+    Calculadora para operações matemáticas básicas. Útil para somar produtos e frete.
+    Exemplo de expressão: "109.90 + 137.90 + 15"
+    """
+    try:
+        # Simple evaluation for basic math only
+        allowed_chars = "0123456789+-*/.() "
+        if not all(c in allowed_chars for c in expression):
+            return "Erro: Expressão contém caracteres não permitidos."
+        
+        result = eval(expression, {"__builtins__": {}})
+        return f"Resultado: {result:.2f}"
+    except Exception as e:
+        return f"Erro ao calcular: {str(e)}"
+
+@mcp.tool()
+async def block_session(session_id: str) -> str:
+    """
+    Bloqueia a sessão atual do chat para evitar mensagens automáticas 
+    após a finalização do pedido ou transferência humana.
+    (Pode ser usado em outras situações de extrema relevância)
+    O bloqueio expira automaticamente em 4 dias (345600 segundos).
+    """
+    pool = await get_db_pool()
+    now_local = _get_local_time()
+    expires_at = now_local + timedelta(seconds=345600)
+    
+    async with pool.acquire() as conn:
+        try:
+            query = """
+            UPDATE public."AIAgentSession"
+            SET is_blocked = true, expires_at = $2
+            WHERE id = $1;
+            """
+            await conn.execute(query, session_id, expires_at)
+            _safe_print(f"🔒 Sessão {session_id} bloqueada por 4 dias.")
+            return "Sessão bloqueada com sucesso. O Agente de IA não responderá mais nesta conversa. ✅"
+        except Exception as e:
+            _safe_print(f"❌ Erro ao bloquear sessão: {e}")
+            return f"Erro ao bloquear sessão: {str(e)}"
 
 @mcp.tool()
 async def save_customer_summary(customer_phone: str, summary: str) -> str:

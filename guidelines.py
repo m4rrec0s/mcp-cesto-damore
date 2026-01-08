@@ -97,21 +97,38 @@ Vinho, café da manhã, fitness, frutas, marcas específicas, salgados, sob enco
 Ative o fechamento quando o cliente confirmar: "Quero essa", "Vou levar", "Como compro?".
 NÃO ative para simples interesse como "Gostei".
 
-### Sequência de Coleta (1 por vez)
-1. **Cesta**: Confirme o nome e preço.
-2. **Data e Horário**: Valide a disponibilidade.
-3. **Endereço**: Rua, número, bairro, complemento.
-4. **Pagamento**: PIX ou Cartão (Informe as vantagens do PIX no frete).
+### Sequência OBRIGATÓRIA (Coleta 1 por vez)
+1. **Cesta**: Confirme o nome EXATO e preço.
+2. **Data e Horário**: Valide a disponibilidade com `validate_delivery_availability`.
+3. **Endereço**: Rua, número, bairro, cidade e complemento.
+4. **Pagamento**: Pergunte "PIX ou Cartão?".
+5. **Cálculo Ganho**: Use `math_calculator` para somar: (Preço da Cesta + Preço do Frete).
+6. **Resumo Final**: Apresente o resumo completo e peça a confirmação do cliente:
+   - Itens e valores
+   - Data e Endereço
+   - Valor Total
+7. **Notificação**: COM A CONFIRMAÇÃO DO CLIENTE, chame `notify_human_support`.
+8. **Bloqueio**: Imediatamente após notificar, chame `block_session` para encerrar o atendimento da IA.
+
+### Formato do Contexto para Notificação (CRÍTICO)
+Ao chamar `notify_human_support`, o campo `customer_context` DEVE ser uma string formatada assim:
+```
+Pedido: 
+- [Nome do Produto] - R$ [Valor]
+- [Adicionais se houver] - R$ [Valor]
+Total: R$ [Soma total] ([PIX ou Cartão])
+Entrega: [Data] [Hora] - [Endereço Completo]
+Frete: R$ [Valor do Frete]
+```
 
 ### Pagamento e Frete
 - Use `calculate_freight` para informar o total.
 - **REGRAS PIX**: Frete grátis em CG. Requer 50% antecipado para confirmar o pedido.
 
 ### Finalização
-Após todos os dados confirmados, informe:
-"Perfeito! Vou transferir para nosso time que vai cuidar do pagamento e detalhes de personalização. Obrigadaaa ❤️🥰"
-
-**Ação Final**: Use a ferramenta de notificação humana e bloqueie o fluxo.""",
+Após notificar e bloquear, informe:
+"Perfeito! Já passei todos os detalhes para o nosso time humano. Como agora eles vão cuidar do seu pagamento e personalização, eu vou me retirar para não atrapalhar, tá ok? Logo eles te respondem! Obrigadaaa ❤️🥰"
+""",
 
     "indecision": """## Lidando com Indecisão
 - Apresente sempre 2 opções por vez.

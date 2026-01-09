@@ -718,7 +718,7 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     return "Preço validado."
 
 @mcp.tool()
-async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True) -> str:
+async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True, session_id: Optional[str] = None) -> str:
     """
     Notifica o suporte humano via WhatsApp com o contexto completo do pedido.
     
@@ -728,9 +728,16 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
         customer_name: Nome do cliente.
         customer_phone: Telefone do cliente.
         should_block_flow: Se deve encerrar o atendimento automático (default: True).
+        session_id: (Opcional) ID da sessão para bloqueio automático.
     """
     support_message = _format_support_message(reason, customer_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
+    
+    # Se solicitado o bloqueio e temos o ID da sessão, fazemos o bloqueio aqui também
+    if should_block_flow and session_id:
+        await block_session(session_id)
+        return "Notificação enviada e atendimento encerrado com sucesso. ✅"
+        
     return "Notificação enviada com sucesso para o time humano. ✅"
 
 @mcp.tool()
@@ -745,6 +752,8 @@ async def math_calculator(expression: str) -> str:
         if not all(c in allowed_chars for c in expression):
             return "Erro: Expressão contém caracteres não permitidos."
         
+        # Remove any leading zeros from numbers to avoid octal issues in some python versions
+        # though eval in py3 doesn't support leading zeros for ints.
         result = eval(expression, {"__builtins__": {}})
         return f"Resultado: {result:.2f}"
     except Exception as e:
@@ -760,20 +769,41 @@ async def block_session(session_id: str) -> str:
     """
     pool = await get_db_pool()
     now_local = _get_local_time()
+    # 4 days for expiry
     expires_at = now_local + timedelta(seconds=345600)
     
+    _safe_print(f" tentando bloquear sessão: {session_id}")
+
     async with pool.acquire() as conn:
         try:
+            # Tenta atualizar sem o prefixo public e com cast explícito se necessário
+            # Prisma models em Postgres costumam ser case-sensitive se tiverem CamelCase
             query = """
-            UPDATE public."AIAgentSession"
+            UPDATE "AIAgentSession"
             SET is_blocked = true, expires_at = $2
             WHERE id = $1;
             """
-            await conn.execute(query, session_id, expires_at)
-            _safe_print(f"🔒 Sessão {session_id} bloqueada por 4 dias.")
-            return "Sessão bloqueada com sucesso. O Agente de IA não responderá mais nesta conversa. ✅"
+            result = await conn.execute(query, session_id, expires_at)
+            
+            # Se não afetou nenhuma linha, talvez o ID precise de cast para UUID ou o nome da tabela precise de ajuste
+            if result == "UPDATE 0":
+                _safe_print(f"⚠️ Nenhuma linha afetada com UPDATE normal, tentando com cast ::uuid para {session_id}")
+                query_uuid = """
+                UPDATE "AIAgentSession"
+                SET is_blocked = true, expires_at = $2
+                WHERE id = $1::uuid;
+                """
+                result = await conn.execute(query_uuid, session_id, expires_at)
+            
+            if result == "UPDATE 1":
+                _safe_print(f"🔒 Sessão {session_id} bloqueada com sucesso até {expires_at}.")
+                return "Sessão bloqueada com sucesso. O Agente de IA não responderá mais nesta conversa. ✅"
+            else:
+                _safe_print(f"⚠️ Falha ao bloquear: Sessão {session_id} não encontrada no banco. Resultado: {result}")
+                return f"Aviso: Não foi possível encontrar a sessão {session_id} para bloquear. Verifique se o ID está correto."
+                
         except Exception as e:
-            _safe_print(f"❌ Erro ao bloquear sessão: {e}")
+            _safe_print(f"❌ Erro fatal ao bloquear sessão {session_id}: {e}")
             return f"Erro ao bloquear sessão: {str(e)}"
 
 @mcp.tool()

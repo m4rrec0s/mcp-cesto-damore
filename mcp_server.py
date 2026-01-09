@@ -353,7 +353,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             )
             SELECT 
               id, name, description, price, image_url, relevance_score, is_exact_match,
-              ROW_NUMBER() OVER (PARTITION BY is_exact_match ORDER BY relevance_score DESC, price DESC) as ranking
+              ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
             FROM products_scored 
             WHERE relevance_score > 0
             ORDER BY is_exact_match DESC, ranking ASC
@@ -370,7 +370,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             if not rows:
                 return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
             
-            # Separate exact matches from fallback
+            # Separate exact matches from fallback (ranking now is global)
             exact_matches = [r for r in rows if r['is_exact_match']]
             fallback_matches = [r for r in rows if not r['is_exact_match']]
             
@@ -380,7 +380,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 "termo": termo,
                 "exatos": [
                     {
-                        "ranking": i + 1,
+                        "ranking": r['ranking'],
                         "id": str(r['id']),
                         "nome": r['name'],
                         "preco": float(r['price']),
@@ -389,11 +389,11 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                         "tipo_resultado": "EXATO",
                         "relevance_score": int(r['relevance_score'])
                     }
-                    for i, r in enumerate(exact_matches)
+                    for r in exact_matches
                 ],
                 "fallback": [
                     {
-                        "ranking": i + 1,
+                        "ranking": r['ranking'],
                         "id": str(r['id']),
                         "nome": r['name'],
                         "preco": float(r['price']),
@@ -402,7 +402,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                         "tipo_resultado": "FALLBACK",
                         "relevance_score": int(r['relevance_score'])
                     }
-                    for i, r in enumerate(fallback_matches)
+                    for r in fallback_matches
                 ]
             }
             

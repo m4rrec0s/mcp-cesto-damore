@@ -735,7 +735,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     
     # Se solicitado o bloqueio e temos o ID da sessão, fazemos o bloqueio aqui também
     if should_block_flow and session_id:
-        await block_session(session_id)
+        await _internal_block_session(session_id)
         return "Notificação enviada e atendimento encerrado com sucesso. ✅"
         
     return "Notificação enviada com sucesso para o time humano. ✅"
@@ -759,13 +759,9 @@ async def math_calculator(expression: str) -> str:
     except Exception as e:
         return f"Erro ao calcular: {str(e)}"
 
-@mcp.tool()
-async def block_session(session_id: str) -> str:
+async def _internal_block_session(session_id: str) -> str:
     """
-    Bloqueia a sessão atual do chat para evitar mensagens automáticas 
-    após a finalização do pedido ou transferência humana.
-    (Pode ser usado em outras situações de extrema relevância)
-    O bloqueio expira automaticamente em 4 dias (345600 segundos).
+    Logica interna para bloquear a sessão atual do chat.
     """
     pool = await get_db_pool()
     now_local = _get_local_time()
@@ -805,6 +801,16 @@ async def block_session(session_id: str) -> str:
         except Exception as e:
             _safe_print(f"❌ Erro fatal ao bloquear sessão {session_id}: {e}")
             return f"Erro ao bloquear sessão: {str(e)}"
+
+@mcp.tool()
+async def block_session(session_id: str) -> str:
+    """
+    Bloqueia a sessão atual do chat para evitar mensagens automáticas 
+    após a finalização do pedido ou transferência humana.
+    (Pode ser usado em outras situações de extrema relevância)
+    O bloqueio expira automaticamente em 4 dias (345600 segundos).
+    """
+    return await _internal_block_session(session_id)
 
 @mcp.tool()
 async def save_customer_summary(customer_phone: str, summary: str) -> str:

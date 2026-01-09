@@ -71,20 +71,30 @@ except Exception as e:
     logger.debug(f"Detalhes do erro: {e}", exc_info=True)
     sys.exit(1)
 
-# Middleware para garantir que MCP está inicializado
-async def check_mcp_initialization(request: Request, call_next):
-    """Middleware que verifica se MCP está totalmente inicializado."""
-    if not mcp_initialized:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "success": False,
-                "error": "Servidor MCP ainda não está inicializado",
-                "status": "initializing",
-                "message": "Tente novamente em alguns segundos"
-            }
-        )
-    return await call_next(request)
+# Middleware para garantir que MCP está inicializado (ASGI implementation to avoid AssertionError with SSE)
+class MCPInitializationMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not mcp_initialized:
+            response = JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "error": "Servidor MCP ainda não está inicializado",
+                    "status": "initializing",
+                    "message": "Tente novamente em alguns segundos"
+                }
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 # Initialize our main FastAPI app with FastMCP's lifespan
 app = FastAPI(
@@ -94,8 +104,8 @@ app = FastAPI(
     lifespan=mcp_app.lifespan
 )
 
-# Adicionar middleware de verificação de inicialização ANTES de montar o MCP
-app.middleware("http")(check_mcp_initialization)
+# Adicionar middleware de verificação de inicialização
+app.add_middleware(MCPInitializationMiddleware)
 
 # Mount the FastMCP app
 app.mount("/mcp", mcp_app)

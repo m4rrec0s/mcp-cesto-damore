@@ -83,8 +83,41 @@ async def get_db_connection():
     return await pool.acquire()
 
 def _get_local_time():
-    """Get current time in Campina Grande timezone."""
-    return datetime.now(CAMPINA_GRANDE_TZ)
+    """
+    Get current time in Campina Grande timezone.
+    ⚠️ CRÍTICO: VPS pode estar em outro timezone (ex: Europa)
+    Esta função SEMPRE converte para America/Fortaleza (UTC-3)
+    
+    Returns:
+        datetime: Datetime com timezone info (aware)
+    """
+    now_utc = datetime.now(pytz.UTC)
+    now_local = now_utc.astimezone(CAMPINA_GRANDE_TZ)
+    return now_local
+
+def _validate_timezone_safety(date_to_check: str) -> tuple[str, str]:
+    """
+    Valida a segurança do fuso horário para evitar erros de comparação de datas.
+    
+    Returns:
+        tuple: (date_str, timestamp_debug_info)
+    """
+    now_local = _get_local_time()
+    date_obj = datetime.strptime(date_to_check, "%Y-%m-%d").date()
+    local_date = now_local.date()
+    
+    debug_info = {
+        "vps_utc": datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "campina_local": now_local.strftime("%Y-%m-%d %H:%M:%S %Z (UTC%z)"),
+        "requested_date": date_to_check,
+        "local_today": local_date.strftime("%Y-%m-%d"),
+        "timezone_name": CAMPINA_GRANDE_TZ.zone,
+        "is_same_day": date_obj == local_date
+    }
+    
+    debug_str = f"🕐 [TZ-SAFE] {debug_info['campina_local']} | Hoje: {debug_info['local_today']} | Requisição: {debug_info['requested_date']}"
+    
+    return date_to_check, debug_str
 
 def _format_structured_response(data: Dict[str, Any], humanized_message: str) -> str:
     """
@@ -430,18 +463,25 @@ async def get_adicionais() -> str:
 @mcp.tool()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
     """
-    Validates delivery availability based on date, time, and business hours.
+    Validates delivery availability based on date, time, business hours, and holidays.
+    ⚠️ TIMEZONE SAFE: Converte automaticamente fuso horário da VPS para Campina Grande
+    
     Returns structured JSON with availability status and humanized message.
     
     Business hours:
     - Monday-Friday: 07:30-12:00, 14:00-17:00
     - Saturday: 08:00-11:00
-    - Sunday: CLOSED (but accepts orders for next business day)
+    - Sunday: CLOSED
     
-    Production time: Minimum 1 hour after confirmation within business hours.
+    Holidays: Checks against Holiday table (closure_type: full_day or custom)
+    Production time: Minimum 1 hour after confirmation
     """
     try:
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        # Validação de timezone - garante que comparações de data estão corretas
+        date_str_validated, tz_debug = _validate_timezone_safety(date_str)
+        _safe_print(tz_debug)
+        
+        date_obj = datetime.strptime(date_str_validated, "%Y-%m-%d").date()
         now_local = _get_local_time()
         
         # Days of week: 0=Monday, 6=Sunday
@@ -449,20 +489,38 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
         day_name = day_names[date_obj.weekday()]
         day_num = date_obj.weekday()
         
+        # Helper to check if date is a holiday
+        async def is_holiday(check_date):
+            pool = await get_db_pool()
+            async with pool.acquire() as conn:
+                query = """
+                SELECT name, closure_type, duration_hours
+                FROM public."Holiday"
+                WHERE is_active = true
+                AND $1::DATE >= start_date 
+                AND $1::DATE <= end_date
+                LIMIT 1;
+                """
+                result = await conn.fetchrow(query, check_date)
+                return result
+        
         # Helper to get next available business day and hours
-        def get_next_available(current_date):
+        async def get_next_available(current_date):
             next_d = current_date + timedelta(days=1)
             while True:
                 d_num = next_d.weekday()
                 d_name = day_names[d_num]
                 hours = BUSINESS_HOURS.get(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][d_num], [])
-                if hours:
+                
+                # Check if it's not a holiday
+                holiday_check = await is_holiday(next_d)
+                if hours and not holiday_check:
                     return next_d, d_name, hours
                 next_d += timedelta(days=1)
 
         # Check if Sunday
         if day_num == 6:
-            next_date, next_day_name, next_hours = get_next_available(date_obj)
+            next_date, next_day_name, next_hours = await get_next_available(date_obj)
             hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
             
             structured_data = {
@@ -479,12 +537,34 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 f"😔 Aos domingos a gente descansa para estar 100% pra você na segunda! ❤️\n\nQue tal marcar para amanhã ({next_date.strftime('%d/%m')})? Funcionamos das {hours_fmt}. Quer agendar? 🥰"
             )
         
+        # Check if date is a holiday
+        holiday_info = await is_holiday(date_obj)
+        if holiday_info:
+            next_date, next_day_name, next_hours = await get_next_available(date_obj)
+            hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
+            holiday_name = holiday_info['name']
+            
+            structured_data = {
+                "status": "unavailable",
+                "reason": "holiday",
+                "date": date_str,
+                "day": day_name,
+                "holiday_name": holiday_name,
+                "next_available_date": next_date.strftime("%Y-%m-%d"),
+                "next_available_day": next_day_name,
+                "next_available_hours": hours_fmt
+            }
+            return _format_structured_response(
+                structured_data,
+                f"😔 No dia {date_obj.strftime('%d/%m')} é {holiday_name} e estamos fechados para aproveitar com a família! ❤️\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Funcionamos das {hours_fmt}. Quer agendar? 🥰"
+            )
+        
         # Get business hours for the requested day
         day_key = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][day_num]
         business_hours = BUSINESS_HOURS.get(day_key, [])
         
         if not business_hours:
-            next_date, next_day_name, next_hours = get_next_available(date_obj)
+            next_date, next_day_name, next_hours = await get_next_available(date_obj)
             hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
             
             structured_data = {
@@ -523,7 +603,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                                 is_interval = True
                                 break
                     
-                    next_date, next_day_name, next_hours = get_next_available(date_obj)
+                    next_date, next_day_name, next_hours = await get_next_available(date_obj)
                     hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
                     current_day_hours = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in business_hours])
 
@@ -576,7 +656,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 is_after_hours = current_time > business_hours[-1][1]
                 
                 if is_after_hours:
-                    next_date, next_day_name, next_hours = get_next_available(date_obj)
+                    next_date, next_day_name, next_hours = await get_next_available(date_obj)
                     next_hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
                     return _format_structured_response(
                         {"status": "unavailable", "reason": "after_hours_today"},
@@ -602,11 +682,16 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
 async def get_active_holidays() -> str:
     """
     Returns list of active holidays/closures from database.
+    ⚠️ TIMEZONE SAFE: Sempre usa America/Fortaleza para comparações
+    
     Returns formatted message with dates when shop is closed.
     Always uses America/Fortaleza time for reference.
     """
     pool = await get_db_pool()
     now_local = _get_local_time()
+    
+    # Log timezone info para debug
+    _safe_print(f"🕐 [HOLIDAYS-CHECK] Timezone: {now_local.strftime('%Z (UTC%z)')} | Horário: {now_local.strftime('%Y-%m-%d %H:%M:%S')}")
     async with pool.acquire() as conn:
         # Use local date to avoid VPS timezone issues
         query = """

@@ -748,16 +748,36 @@ async def calculate_freight(city: str, payment_method: str) -> str:
     Regras:
     - Campina Grande: PIX = R$ 0.00 | Cartão = R$ 10.00
     - Cidades Vizinhas: PIX = R$ 15.00 | Cartão = Valor definido pelo atendente
+
+    Validações adicionais:
+    - Se cidade ou método estiverem ausentes, retorna erro estruturado orientando a perguntar ao cliente.
+    - Normaliza formas escritas de 'cartão' e verifica 'campina' robustamente.
     """
-    city_lower = city.lower().strip()
-    method_lower = payment_method.lower().strip()
-    is_pix = method_lower == 'pix'
-    
-    # Cidades vizinhas comuns
-    neighbors = ["puxinanã", "lagoa seca", "queimadas", "massaranduba", "lagoa de roça", "esperança"]
+    if not city or str(city).strip() == "":
+        return _format_structured_response(
+            {"status": "error", "error": "missing_city"},
+            "⚠️ Por favor confirme a cidade de entrega antes de calcular o frete. Pergunte ao cliente: 'Qual cidade será a entrega?'"
+        )
+
+    if not payment_method or str(payment_method).strip() == "":
+        return _format_structured_response(
+            {"status": "error", "error": "missing_payment_method"},
+            "⚠️ Por favor confirme o método de pagamento do cliente antes de calcular o frete. Pergunte: 'PIX ou Cartão?'"
+        )
+
+    city_lower = str(city).lower().strip()
+
+    # Normalize payment method variants
+    method_lower = str(payment_method).lower().strip()
+    is_pix = method_lower.startswith('pix')
+    is_card = any(k in method_lower for k in ['cart', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito'])
+
+    # Cidades vizinhas comuns (normalize accents and lowercase)
+    neighbors = ["puxinanã", "puxinana", "lagoa seca", "queimadas", "massaranduba", "lagoa de roça", "lagoa de roca", "esperança", "esperanca"]
     is_neighbor = any(n in city_lower for n in neighbors)
-    
-    if "campina" in city_lower:
+
+    # Robust Campina detection
+    if re.search(r"\bcampina\b", city_lower) or "campina grande" in city_lower:
         val = 0.0 if is_pix else 10.0
         return f"Frete para {city}: R$ {val:.2f}"
     elif is_neighbor:
@@ -769,8 +789,13 @@ async def calculate_freight(city: str, payment_method: str) -> str:
         # Fallback para outras cidades ou se não identificado
         if is_pix:
             return f"Frete para {city}: R$ 15.00 (Valor padrão para região metropolitana)"
-        else:
+        elif is_card:
             return f"Frete para {city}: O valor do frete para {city} será confirmado pelo atendente humano. 🤝"
+        else:
+            return _format_structured_response(
+                {"status": "error", "error": "unknown_payment_method"},
+                "⚠️ Método de pagamento não reconhecido. Por favor pergunte ao cliente: 'PIX ou Cartão?'"
+            )
 
 @mcp.tool()
 async def get_current_business_hours() -> str:
@@ -806,23 +831,31 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
 async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True, session_id: Optional[str] = None) -> str:
     """
     Notifica o suporte humano via WhatsApp com o contexto completo do pedido.
-    
-    Args:
-        reason: Motivo claro (ex: "Finalização de Pedido", "Dúvida sobre Frete")
-        customer_context: Texto detalhado com itens, valores, data de entrega e endereço.
-        customer_name: Nome do cliente.
-        customer_phone: Telefone do cliente.
-        should_block_flow: Se deve encerrar o atendimento automático (default: True).
-        session_id: (Opcional) ID da sessão para bloqueio automático.
+
+    Validações:
+    - Se o motivo for finalização de pedido, exige que o customer_context contenha: cesta, entrega, endereço e pagamento.
+    - Se o contexto estiver incompleto, retorna mensagem de erro orientando a coletar os dados antes de notificar.
     """
+    # Validate context for checkout finalization
+    reason_lower = (reason or "").lower()
+    if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado"]):
+        ctx = (customer_context or "").lower()
+        required = ["cesta", "entrega", "endereço", "pagamento"]
+        missing = [r for r in required if r not in ctx]
+        if missing:
+            return _format_structured_response(
+                {"status": "error", "error": "incomplete_context", "missing": missing},
+                f"⚠️ Contexto incompleto para finalização. Faltando: {', '.join(missing)}. Por favor colete: Cesta, Data/Hora de entrega, Endereço completo, Método de Pagamento e Frete antes de notificar o atendente."
+            )
+
     support_message = _format_support_message(reason, customer_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
-    
+
     # Se solicitado o bloqueio e temos o ID da sessão, fazemos o bloqueio aqui também
     if should_block_flow and session_id:
         await _internal_block_session(session_id)
         return "Notificação enviada e atendimento encerrado com sucesso. ✅"
-        
+
     return "Notificação enviada com sucesso para o time humano. ✅"
 
 @mcp.tool()

@@ -544,11 +544,19 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             exact_matches = [r for r in rows if r['is_exact_match']]
             fallback_matches = [r for r in rows if not r['is_exact_match']]
             
+            # Check if search is for caneca - add special guidance
+            is_caneca_search = 'caneca' in primary_term.lower()
+            caneca_guidance = ""
+            if is_caneca_search:
+                caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção). Qual você prefere?"
+            
             # Structure results for LLM consumption
             structured = {
                 "status": "found" if rows else "not_found",
                 "termo": termo,
                 "termo_processado": primary_term,
+                "is_caneca_search": is_caneca_search,
+                "caneca_guidance": caneca_guidance,
                 "exatos": [
                     {
                         "ranking": r['ranking'],

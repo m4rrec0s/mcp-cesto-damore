@@ -625,7 +625,9 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
     """
     VERIFICA DISPONIBILIDADE de entrega para uma DATA (YYYY-MM-DD) e HORA (HH:MM).
     Use para validar se podemos entregar no momento que o cliente deseja.
-    Se o cliente não informar a hora, a ferramenta mostra os blocos disponíveis.
+    
+    ⚠️ REGRA CRÍTICA: Se o cliente não informar a hora, a ferramenta retornará os blocos disponíveis (ex: '07:30-12:00, 14:00-17:00').
+    Você DEVE informar TODOS os blocos retornados ao cliente. NUNCA oculte turnos.
     """
     try:
         # Validação de timezone - garante que comparações de data estão corretas

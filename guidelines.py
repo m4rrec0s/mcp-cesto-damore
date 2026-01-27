@@ -98,7 +98,11 @@ Vinho, fitness, frutas, marcas específicas, salgados, sob encomenda.
 - Esta é uma pergunta sobre LOCALIZAÇÃO, NÃO sobre horários específicos
 - ❌ **NUNCA** use `validate_delivery_availability` para isso
 - ✅ **SEMPRE** responda com a mensagem padrão:
-  "Fazemos entregas para Campina Grande (grátis no PIX) e em cidades vizinhas por R$ 15,00 no PIX. No fim do atendimento, um especialista vai te informar tudo certinho! 💕"
+  "Fazemos entregas em Campina Grande e região. Para confirmar se entregamos no seu endereço, nosso especialista pode verificar! 💕"
+  
+  **Informações complementares (se cliente perguntar sobre preços):**
+  - Campina Grande: Entrega gratuita no PIX
+  - No final do atendimento, o especialista confirma a cobertura e valores exatos!
 
 #### Pergunta sobre DATA/HORÁRIO específico ("Entrega hoje?", "Entrega amanhã às 14h?")
 - Esta é uma pergunta sobre DISPONIBILIDADE de horário
@@ -107,7 +111,7 @@ Vinho, fitness, frutas, marcas específicas, salgados, sob encomenda.
 
 ### Localização e Frete
 - **Campina Grande**: Entrega gratuita no PIX
-- **Cidades vizinhas (até 20km)**: R$ 15,00 no PIX
+- **Região (até 20km)**: Cobertura variável, especialista confirma
 - **Retirada**: Grátis (atendente passa os detalhes)
 
 ⚠️ **NUNCA calcule frete diretamente**. Sempre diga: "O frete será confirmado pelo nosso atendente no final junto com os dados de pagamento! 💕"
@@ -195,19 +199,24 @@ https://wa.me/c/558382163104
 **OBJETIVO:** Responder autonomamente dúvidas básicas sobre localização e cobertura de entrega.
 
 ## Sobre a loja
-Somos de Campina Grande - PB, bairro Jardim Tavares! 
-Entregamos em Campina Grande e cidades vizinhas até 20 km 📍
+Somos de Campina Grande - PB, no bairro Jardim Tavares! 
+Entregamos em Campina Grande com frete grátis no PIX e fazemos entregas na região também. 📍
 
 ⚠️ **INFORMAÇÕES DE RETIRADA**
-Se o cliente quiser retirar pessoalmente, diga: "Legal! Você pode retirar sua cesta no Jardim Tavares, aqui em Campina Grande. Um atendente especializado vai te passar o endereço exato e horário disponível! 🏪"
+Se o cliente quiser retirar pessoalmente, diga: "Legal! Você pode retirar sua cesta aqui no Jardim Tavares, em Campina Grande. Um atendente especializado vai te passar o endereço exato e horário disponível! 🏪"
+
+⚠️ **CONSULTA DE COBERTURA EM OUTRAS CIDADES**
+Se perguntarem sobre entrega em cidade específica (ex: João Pessoa, Patos, etc):
+"Fazemos entregas em Campina Grande e região. Para confirmar se entregamos no seu endereço, nosso especialista pode verificar! 💕"
 
 ⚠️ **NUNCA FORNEÇA:**
 - ❌ Endereço completo com rua e número (deixe para o atendente humano)
 - ❌ Chave PIX ou dados bancários
 - ❌ Telefone ou contatos da loja
+- ❌ Afirme que "entrega" ou "não entrega" em cidades específicas sem consultar o especialista
 
-## Mensagem Padrão de Entrega
-"Aqui em Campina Grande a entrega é gratuita no PIX e entregamos em cidades vizinhas até 20 km por R$ 15 no PIX. Além disso, você também pode retirar sua cesta diretamente conosco no Jardim Tavares! 🏪\"""",
+## Mensagem Padrão sobre Entrega (use quando cliente perguntar genericamente)
+"Aqui em Campina Grande a entrega é gratuita no PIX! Para outras cidades da região, o especialista confirma a cobertura e o valor do frete no final do atendimento. Você também pode retirar sua cesta diretamente conosco no Jardim Tavares! 🏪\"""",
 
     "faq_production": """### ⏱️ FAQ - Tempo de Produção
 **Resposta Padrão:**

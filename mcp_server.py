@@ -276,81 +276,218 @@ def _format_support_message(
         
     return message
 
-@mcp.tool()
-async def search_guidelines(query: str) -> str:
-    """
-    Searches the service guidelines and documentation for relevant information based on a query.
-    Acts like a simple RAG (Retrieval-Augmented Generation) to find the best documentation snippet.
-    Returns structured JSON with matched guidelines.
-    """
-    STOP_WORDS = {"o", "a", "os", "as", "um", "uma", "de", "do", "da", "em", "para", "com", "no", "na", "que", "está", "procurando", "cliente"}
-    
-    query_clean = query.lower().strip()
-    query_terms = [t for t in re.findall(r'\w+', query_clean) if t not in STOP_WORDS and len(t) > 2]
-    
-    if not query_terms:
-        query_terms = re.findall(r'\w+', query_clean)
+# =======================
+# MCP PROMPTS (GUIDELINES)
+# =======================
+# Guidelines accessible via MCP protocol prompts/list and prompts/get
+# AI should consult these before important actions
 
-    results = []
-    for category, content in GUIDELINES.items():
-        score = 0
-        content_lower = content.lower()
-        cat_lower = category.lower()
-        if query_clean in cat_lower or cat_lower in query_clean:
-            score += 20
-        match_count = 0
-        for term in query_terms:
-            if term in cat_lower:
-                score += 15
-                match_count += 1
-            if term in content_lower:
-                occurrences = content_lower.count(term)
-                score += min(occurrences, 5) * 2 
-                match_count += 1
-        if len(query_terms) > 1 and match_count >= len(query_terms):
-            score += 10
-        if score > 0:
-            results.append((score, category, content))
-            
-    results.sort(key=lambda x: x[0], reverse=True)
-    if not results:
-        return _format_structured_response(
-            {"status": "not_found", "available_categories": list(GUIDELINES.keys())},
-            f"Não encontrei documentação específica para '{query}'. Disponíveis: {', '.join(GUIDELINES.keys())}"
-        )
+@mcp.prompt()
+async def core_identity_guideline() -> str:
+    """
+    Identidade, tom e comportamento base da Ana.
     
-    top_results = results[:2]
-    structured_data = {
-        "status": "found",
-        "query": query,
-        "matches": [{"category": cat, "relevance_score": score} for score, cat, _ in top_results]
-    }
-    
-    humanized = "Aqui estão as informações mais relevantes encontradas:\n\n"
-    for _, cat, text in top_results:
-        humanized += f"--- Categoria: {cat} ---\n{text}\n\n"
-    return _format_structured_response(structured_data, humanized)
+    USE QUANDO:
+    - Início de conversa (apresentação)
+    - Definir tom de comunicação
+    - Entender filosofia de atendimento
+    - Referência sobre humanização
+    """
+    return GUIDELINES["core"]
 
-@mcp.tool()
-async def get_service_guideline(category: str) -> str:
+@mcp.prompt()
+async def delivery_rules_guideline() -> str:
     """
-    Returns specific customer service guidelines based on a category.
-    Available categories: core, inexistent_products, delivery_rules, customization, 
-    closing_protocol, location, mass_orders, faq_production, indecision.
+    Regras de entrega, horários de funcionamento e áreas de cobertura.
+    
+    USE QUANDO:
+    - Cliente perguntar sobre horários
+    - Cliente perguntar "Faz entrega em [cidade]?"
+    - Validar disponibilidade de data/hora
+    - Calcular frete
+    - Dúvidas sobre entregas
     """
-    return GUIDELINES.get(category, f"Guidelines for '{category}' not found. Available: {', '.join(GUIDELINES.keys())}")
+    return GUIDELINES["delivery_rules"]
+
+@mcp.prompt()
+async def product_selection_guideline() -> str:
+    """
+    Como apresentar e selecionar produtos para o cliente.
+    
+    USE QUANDO:
+    - Apresentar cestas ou flores
+    - Cliente pedir "mais opções"
+    - Cliente especificar tipo de produto
+    - Necessitar manter consistência de tipo
+    - Decidir quantos produtos mostrar
+    """
+    return GUIDELINES["product_selection"]
+
+@mcp.prompt()
+async def closing_protocol_guideline() -> str:
+    """
+    Protocolo completo de fechamento de vendas (9 passos obrigatórios).
+    
+    USE QUANDO:
+    - Cliente disser "quero essa", "vou levar", "como compro?"
+    - Iniciar processo de finalização
+    - Coletar dados para pedido
+    - Transferir para atendente humano
+    """
+    return GUIDELINES["closing_protocol"]
+
+@mcp.prompt()
+async def customization_guideline() -> str:
+    """
+    Regras sobre personalização e coleta de fotos.
+    
+    USE QUANDO:
+    - Cliente perguntar sobre personalização
+    - Cliente querer enviar fotos
+    - Cliente perguntar sobre customização
+    - Explicar processo de personalização
+    """
+    return GUIDELINES["customization"]
+
+@mcp.prompt()
+async def inexistent_products_guideline() -> str:
+    """
+    Como lidar com produtos fora do catálogo.
+    
+    USE QUANDO:
+    - Cliente pedir produto que não vendemos
+    - Cliente mencionar vinho, café da manhã, frutas, etc
+    - Produto não encontrado em busca
+    - Necessitar oferecer alternativas
+    """
+    return GUIDELINES["inexistent_products"]
+
+@mcp.prompt()
+async def indecision_guideline() -> str:
+    """
+    Como ajudar cliente indeciso.
+    
+    USE QUANDO:
+    - Cliente já viu 4+ produtos e ainda pede mais
+    - Cliente está indeciso entre opções
+    - Necessário enviar catálogo completo
+    - Cliente não sabe o que quer
+    """
+    return GUIDELINES["indecision"]
+
+@mcp.prompt()
+async def mass_orders_guideline() -> str:
+    """
+    Procedimento para pedidos corporativos e em lote.
+    
+    USE QUANDO:
+    - Cliente mencionar quantidade >= 20 unidades
+    - Orçamento > R$ 1.000
+    - Pedido corporativo ou empresarial
+    - Necessitar descontos de volume
+    """
+    return GUIDELINES["mass_orders"]
+
+@mcp.prompt()
+async def location_guideline() -> str:
+    """
+    Informações sobre localização e logística da loja.
+    
+    USE QUANDO:
+    - Cliente perguntar onde fica a loja
+    - Cliente querer retirar pessoalmente
+    - Dúvidas sobre cobertura de entrega
+    - Informações sobre a loja física
+    """
+    return GUIDELINES["location"]
+
+@mcp.prompt()
+async def faq_production_guideline() -> str:
+    """
+    FAQ sobre tempo de produção e prazos.
+    
+    USE QUANDO:
+    - Cliente perguntar "quanto tempo demora?"
+    - Dúvidas sobre produção imediata
+    - Explicar prazos de customização
+    - Diferenciar pronta entrega vs personalizado
+    """
+    return GUIDELINES["faq_production"]
+
+@mcp.prompt()
+async def fallback_guideline() -> str:
+    """
+    Como lidar com contextos fora do escopo.
+    
+    USE QUANDO:
+    - Cliente faz perguntas não relacionadas à loja
+    - Assuntos pessoais, políticos, aleatórios
+    - Spam ou comportamento suspeito
+    - Redirecionar para o assunto da loja
+    """
+    return GUIDELINES["fallback"]
+
+# =======================
+# CATALOG & SEARCH TOOLS
+# =======================
 
 @mcp.tool()
 async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: float = 999999, exclude_product_ids: list = None) -> str:
     """
-    Consulta o catálogo de cestas com lógica de EXATO > FALLBACK.
-    Retorna TOP 6 produtos com ranking, is_exact_match e tipo_resultado.
+    Busca produtos no catálogo por termo, com filtros de preço e exclusão de IDs já enviados.
     
-    Args:
-        termo: Search term (ocasião, item, produto)
-        precoMinimo: Minimum price (default 0)
-        precoMaximo: Maximum price (default 999999)
-        exclude_product_ids: IDs já enviados (para evitar repetição)
+    ## WHEN TO USE
+    - Cliente menciona ocasião (aniversário, namorados, casamento, etc)
+    - Cliente pede tipo específico de produto (flores, caneca, quadro, pelúcia)
+    - Cliente quer "mais opções" ou produtos diferentes
+    - Necessário buscar produtos com critérios específicos
+    
+    ## PARAMETERS
+    - termo: Palavra-chave da busca (ocasião ou tipo de produto)
+      Exemplos: "aniversário", "flores", "caneca", "namorados", "simples"
+    - precoMinimo: Preço mínimo em R$ (default: 0)
+    - precoMaximo: Preço máximo em R$ (default: 999999)
+    - exclude_product_ids: Lista de IDs já mostrados nesta sessão (use sent products list)
+    
+    ## RESPONSE FORMAT
+    Retorna JSON estruturado com dois arrays:
+    {
+      "exatos": [...],      // Produtos com match exato no termo (prioridade alta)
+      "fallback": [...]     // Produtos relacionados (prioridade baixa)
+    }
+    
+    Cada produto contém:
+    - ranking: Ordem de relevância (menor número = melhor match)
+    - id: ID único do produto
+    - nome: Nome do produto
+    - preco: Preço em formato float
+    - descricao: Descrição completa
+    - imagem: URL completa da imagem
+    - production_time: Horas necessárias para produção
+    - tipo_resultado: "EXATO" ou "FALLBACK"
+    
+    ## PRESENTATION RULES (CRITICAL)
+    1. **SEMPRE priorize produtos "EXATO" sobre "FALLBACK"**
+    2. **Mostre exatamente 2 produtos por consulta**
+    3. Use o campo `ranking` para ordenar (menor = melhor)
+    4. **OBRIGATÓRIO**: Inclua production_time na apresentação:
+       - Se ≤ 1h: "Produção imediata no mesmo dia ✅"
+       - Se > 1h: "Precisamos de {production_time} horas para produção"
+    5. **Price Fallback**: Se esvaziar com precoMaximo, ofereça buscar sem limite
+    
+    ## EXAMPLES
+    Cliente: "Quero para aniversário" 
+    → termo="aniversário", precoMaximo=999999
+    
+    Cliente: "Flores baratas" 
+    → termo="flores", precoMaximo=120
+    
+    Cliente: "Mais opções" 
+    → termo=<último termo usado>, exclude_product_ids=[IDs já enviados]
+    
+    Cliente: "Caneca personalizada"
+    → termo="caneca", precoMaximo=999999
+    → LEMBRE: Mencionar "Temos canecas de pronta entrega e customizáveis (8h produção)"
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -364,7 +501,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
             ),
             products_scored AS (
-              SELECT p.id, p.name, p.description, p.price, p.image_url,
+              SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
               (
                 -- Name exact match (highest priority = 100)
                 (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
@@ -385,7 +522,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 AND NOT (p.id::TEXT = ANY($4::TEXT[]))
             )
             SELECT 
-              id, name, description, price, image_url, relevance_score, is_exact_match,
+              id, name, description, price, image_url, production_time, relevance_score, is_exact_match,
               ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
             FROM products_scored 
             WHERE relevance_score > 0
@@ -419,6 +556,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                         "preco": float(r['price']),
                         "descricao": r['description'],
                         "imagem": r['image_url'],
+                        "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
                         "tipo_resultado": "EXATO",
                         "relevance_score": int(r['relevance_score'])
                     }
@@ -432,6 +570,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                         "preco": float(r['price']),
                         "descricao": r['description'],
                         "imagem": r['image_url'],
+                        "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
                         "tipo_resultado": "FALLBACK",
                         "relevance_score": int(r['relevance_score'])
                     }
@@ -452,7 +591,38 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
 
 @mcp.tool()
 async def get_adicionais() -> str:
-    """Fetch all available add-ons (adicionais)."""
+    """
+    Retorna lista de todos os adicionais (itens extras) disponíveis para complementar cestas.
+    
+    ## WHEN TO USE
+    - Após cliente escolher uma cesta
+    - Cliente quer "incrementar" ou "adicionar algo mais"
+    - Sugerir itens extras para tornar presente mais especial
+    - Cliente pergunta "o que mais posso adicionar?"
+    
+    ## RESPONSE FORMAT
+    JSON estruturado com lista de adicionais:
+    {
+      "status": "found",
+      "adicionais": [
+        {
+          "name": "Nome do adicional",
+          "price": 19.90,
+          "description": "Descrição",
+          "image_url": "URL da imagem"
+        }
+      ]
+    }
+    
+    ## PRESENTATION
+    - Apresente como "Para tornar ainda mais especial" ou similar
+    - Mostre preço de cada adicional
+    - Deixe cliente escolher quais quer adicionar
+    - Não force, apenas sugira naturalmente
+    
+    ## EXAMPLES
+    Cliente escolheu cesta → Sugira: "Quer adicionar algo mais especial? Temos..."
+    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT name, base_price as price, description, image_url FROM public."Item" WHERE type = \'ADDITIONAL\'')

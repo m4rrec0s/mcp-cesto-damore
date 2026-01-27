@@ -1284,9 +1284,10 @@ async def proc_validar_horario_funcionamento() -> str:
        - Cliente perguntando para UMA DATA ESPECÍFICA? → Use validate_delivery_availability com essa data
     
     2. RESPOSTA PARA "AGORA":
-       Independente do horário, SEMPRE responda com:
-       "✅ Estamos abertos! Funcionamos de [HORÁRIO_HOJE]"
-       Ou se for fora do horário:
+       Analise o horário atual recebido no prompt. Se estiver dentro do horário operacional (considerando os intervalos), responda:
+       "✅ Estamos abertos! Funcionamos hoje das [HORÁRIO_INÍCIO] às [HORÁRIO_FIM]."
+       
+       Se estiver fora do horário operacional, responda:
        "⏰ No momento estamos fechados. Abrimos novamente [PRÓXIMO_HORÁRIO]"
        
        Sempre adicione: "Mas você pode enviar a mensagem agora que respondemos em breve! 📱"

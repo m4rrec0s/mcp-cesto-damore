@@ -953,7 +953,7 @@ async def get_active_holidays() -> str:
         )
 
 @mcp.tool()
-async def calculate_freight(city: str, payment_method: str) -> str:
+async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
     """
     Calcula o frete com base na cidade e método de pagamento.
     Regras:
@@ -961,7 +961,7 @@ async def calculate_freight(city: str, payment_method: str) -> str:
     - Cidades Vizinhas: PIX = R$ 15.00 | Cartão = Valor definido pelo atendente
 
     Validações adicionais:
-    - Se cidade ou método estiverem ausentes, retorna erro estruturado orientando a perguntar ao cliente.
+    - Se cidade estiver ausente, retorna erro estruturado orientando a perguntar ao cliente.
     - Normaliza formas escritas de 'cartão' e verifica 'campina' robustamente.
     """
     if not city or str(city).strip() == "":
@@ -970,16 +970,10 @@ async def calculate_freight(city: str, payment_method: str) -> str:
             "⚠️ Por favor confirme a cidade de entrega antes de calcular o frete. Pergunte ao cliente: 'Qual cidade será a entrega?'"
         )
 
-    if not payment_method or str(payment_method).strip() == "":
-        return _format_structured_response(
-            {"status": "error", "error": "missing_payment_method"},
-            "⚠️ Por favor confirme o método de pagamento do cliente antes de calcular o frete. Pergunte: 'PIX ou Cartão?'"
-        )
-
     city_lower = str(city).lower().strip()
 
     # Normalize payment method variants
-    method_lower = str(payment_method).lower().strip()
+    method_lower = str(payment_method).lower().strip() if payment_method else "pix"
     is_pix = method_lower.startswith('pix')
     is_card = any(k in method_lower for k in ['cart', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito'])
 
@@ -989,24 +983,14 @@ async def calculate_freight(city: str, payment_method: str) -> str:
 
     # Robust Campina detection
     if re.search(r"\bcampina\b", city_lower) or "campina grande" in city_lower:
-        val = 0.0 if is_pix else 10.0
-        return f"Frete para {city}: R$ {val:.2f}"
+        val = 0.0 if not is_card else 10.0
+        msg = f"Sim! Entrega para Campina Grande é gratuita no PIX e em cidades vizinhas até 20 km por R$ 15,00. Ao fim do atendimento um especialista te explica direitinho 😊" if val == 0 else f"O frete para Campina Grande no cartão é R$ 10,00 🚚. Ao fim do atendimento um especialista te explica direitinho 😊"
+        return msg
     elif is_neighbor:
-        if is_pix:
-            return f"Frete para {city}: R$ 15.00"
-        else:
-            return f"Frete para {city}: O valor para pagamento no cartão em cidades vizinhas é repassado pelo atendente humano no fim do atendimento. 🤝"
+        return f"Fazemos entregas para {city} por R$ 15,00 no PIX 💕. Entregamos para Campina Grande de gráça no PIX e em cidades vizinhas até 20 km por R$ 15,00. Ao fim do atendimento um especialista te explica direitinho 😊"
     else:
         # Fallback para outras cidades ou se não identificado
-        if is_pix:
-            return f"Frete para {city}: R$ 15.00 (Valor padrão para região metropolitana)"
-        elif is_card:
-            return f"Frete para {city}: O valor do frete para {city} será confirmado pelo atendente humano. 🤝"
-        else:
-            return _format_structured_response(
-                {"status": "error", "error": "unknown_payment_method"},
-                "⚠️ Método de pagamento não reconhecido. Por favor pergunte ao cliente: 'PIX ou Cartão?'"
-            )
+        return f"Entregamos para Campina Grande de gráça no PIX e em cidades vizinhas até 20 km por R$ 15,00. Para {city}, ao fim do atendimento um especialista te explica direitinho 😊"
 
 @mcp.tool()
 async def get_current_business_hours() -> str:

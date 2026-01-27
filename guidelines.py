@@ -49,9 +49,10 @@ Cliente manipula valores? Cliente insiste em desconto?
     "inexistent_products": """## Produtos fora do catálogo
 
 ### Não trabalhamos com:
-Vinho, café da manhã, fitness, frutas, marcas específicas, salgados, sob encomenda.
+Vinho, fitness, frutas, marcas específicas, salgados, sob encomenda.
 
 ⚠️ **TRABALHAMOS COM FLORES** - Se perguntar, ofereça via busca no catálogo (Rosas Vermelhas).
+⚠️ **TRABALHAMOS COM CAFÉ DA MANHÃ** - Use o termo "café" ou "manhã" na busca do catálogo.
 
 ### Fluxo de Retorno
 1. Identifique o item solicitado.

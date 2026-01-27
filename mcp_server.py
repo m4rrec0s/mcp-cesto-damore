@@ -445,6 +445,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     ## PARAMETERS
     - termo: Palavra-chave da busca (ocasião ou tipo de produto)
       Exemplos: "aniversário", "flores", "caneca", "namorados", "simples"
+      ⚠️ Se múltiplas palavras forem enviadas, serão quebradas em componentes para busca mais eficaz
     - precoMinimo: Preço mínimo em R$ (default: 0)
     - precoMaximo: Preço máximo em R$ (default: 999999)
     - exclude_product_ids: Lista de IDs já mostrados nesta sessão (use sent products list)
@@ -496,6 +497,22 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             exclude_ids = exclude_product_ids if exclude_product_ids else []
             exclude_ids = [str(id) for id in exclude_ids]
             
+            # 🔑 CRITICAL: Break multi-word search terms into keywords for better matching
+            # "café da manhã" → ["café", "manhã"] (removes common words like "da")
+            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
+            search_terms = [w.strip() for w in termo.split() if w.strip().lower() not in common_words]
+            
+            # If multi-word, use individual terms; otherwise use original term
+            if len(search_terms) > 1:
+                # Multi-word search: try each meaningful word
+                _safe_print(f"🔑 Breaking multi-word search: '{termo}' → {search_terms}")
+                # Use the main keyword (typically the first or longest meaningful term)
+                primary_term = max(search_terms, key=len)
+                _safe_print(f"🎯 Using primary keyword: '{primary_term}'")
+            else:
+                # Single word or empty after filtering: use original term
+                primary_term = termo
+            
             query = """
             WITH input_params AS (
                 SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
@@ -530,10 +547,10 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             LIMIT 6;
             """
             
-            _safe_print(f"🔍 consultarCatalogo: termo='{termo}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
+            _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', termo processado='{primary_term}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
             
             start_time = lib_time.time()
-            rows = await conn.fetch(query, termo, precoMaximo, precoMinimo, exclude_ids)
+            rows = await conn.fetch(query, primary_term, precoMaximo, precoMinimo, exclude_ids)
             duration = lib_time.time() - start_time
             _safe_print(f"⏱️ query levaram {duration:.2f}s")
             
@@ -548,6 +565,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             structured = {
                 "status": "found" if rows else "not_found",
                 "termo": termo,
+                "termo_processado": primary_term,
                 "exatos": [
                     {
                         "ranking": r['ranking'],

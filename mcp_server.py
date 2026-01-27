@@ -85,37 +85,20 @@ async def get_db_connection():
 def _get_local_time():
     """
     Get current time in Campina Grande timezone.
-    ⚠️ CRÍTICO: VPS pode estar em outro timezone (ex: Europa)
-    Esta função SEMPRE converte para America/Fortaleza (UTC-3)
-    
     Returns:
-        datetime: Datetime com timezone info (aware)
+        datetime: aware datetime in America/Fortaleza (UTC-3)
     """
-    now_utc = datetime.now(pytz.UTC)
-    now_local = now_utc.astimezone(CAMPINA_GRANDE_TZ)
-    return now_local
+    return datetime.now(CAMPINA_GRANDE_TZ)
 
 def _validate_timezone_safety(date_to_check: str) -> tuple[str, str]:
     """
-    Valida a segurança do fuso horário para evitar erros de comparação de datas.
-    
-    Returns:
-        tuple: (date_str, timestamp_debug_info)
+    Check if the requested date matches local date for logging purposes.
     """
     now_local = _get_local_time()
     date_obj = datetime.strptime(date_to_check, "%Y-%m-%d").date()
     local_date = now_local.date()
     
-    debug_info = {
-        "vps_utc": datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "campina_local": now_local.strftime("%Y-%m-%d %H:%M:%S %Z (UTC%z)"),
-        "requested_date": date_to_check,
-        "local_today": local_date.strftime("%Y-%m-%d"),
-        "timezone_name": CAMPINA_GRANDE_TZ.zone,
-        "is_same_day": date_obj == local_date
-    }
-    
-    debug_str = f"🕐 [TZ-SAFE] {debug_info['campina_local']} | Hoje: {debug_info['local_today']} | Requisição: {debug_info['requested_date']}"
+    debug_str = f"🕐 [TIME] {now_local.strftime('%H:%M:%S')} | Hoje: {local_date.strftime('%Y-%m-%d')} | Requisição: {date_to_check}"
     
     return date_to_check, debug_str
 
@@ -626,8 +609,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
     VERIFICA DISPONIBILIDADE de entrega para uma DATA (YYYY-MM-DD) e HORA (HH:MM).
     Use para validar se podemos entregar no momento que o cliente deseja.
     
-    ⚠️ REGRA CRÍTICA: Se o cliente não informar a hora, a ferramenta retornará os blocos disponíveis (ex: '07:30-12:00, 14:00-17:00').
-    Você DEVE informar TODOS os blocos retornados ao cliente. NUNCA oculte turnos.
+    ⚠️ REGRA CRÍTICA: Se o cliente não informar a hora, a ferramenta retornará os blocos disponíveis e uma lista de 'suggested_slots'.
+    Você DEVE informar os 'suggested_slots' ao cliente para facilitar a escolha.
     """
     try:
         # Validação de timezone - garante que comparações de data estão corretas
@@ -802,27 +785,96 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
         
         else:
             # No specific time provided - provide overview
-            hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in business_hours])
+            # 🕒 [MELHORIA]: Filter available hours based on current time + 1h production
+            now_local = _get_local_time()
+            current_time = now_local.time()
+            
+            # Helper to format business hours for display
+            def format_hours(h_list):
+                return ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in h_list])
+
+            hours_fmt = format_hours(business_hours)
             
             if date_obj == now_local.date():
-                current_time = now_local.time()
                 is_after_hours = current_time > business_hours[-1][1]
                 
                 if is_after_hours:
                     next_date, next_day_name, next_hours = await get_next_available(date_obj)
-                    next_hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
+                    next_hours_fmt = format_hours(next_hours)
                     return _format_structured_response(
-                        {"status": "unavailable", "reason": "after_hours_today"},
-                        f"Poxa, hoje já encerramos as entregas! ⏰\n\nMas você pode marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})! Abrimos das {next_hours_fmt}. Quer agendar? 🥰"
+                        {
+                            "status": "unavailable", 
+                            "reason": "after_hours_today",
+                            "current_time_campina": now_local.strftime("%H:%M")
+                        },
+                        f"Poxa, hoje os pedidos já encerraram (agora são {now_local.strftime('%H:%M')})! ⏰\n\nMas você pode marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})! Abrimos das {next_hours_fmt}. Quer agendar? 🥰"
                     )
                 
+                # Filter slots that are still possible (now + 1h)
+                # We need to know which blocks are still "open" for new orders
+                min_ready_dt = now_local + timedelta(hours=1)
+                min_ready_time = min_ready_dt.time()
+                
+                available_now = []
+                for s, e in business_hours:
+                    # If the block ends after we can have a product ready, it's partially or fully available
+                    if e > min_ready_time:
+                        # The start of availability in this block is max(block_start, min_ready)
+                        effective_start = max(s, min_ready_time)
+                        available_now.append((effective_start, e))
+                
+                if not available_now:
+                     next_date, next_day_name, next_hours = await get_next_available(date_obj)
+                     next_hours_fmt = format_hours(next_hours)
+                     return _format_structured_response(
+                        {
+                            "status": "unavailable", 
+                            "reason": "no_slots_left_today",
+                            "current_time_campina": now_local.strftime("%H:%M")
+                        },
+                        f"Hoje não conseguimos mais produzir a tempo (agora são {now_local.strftime('%H:%M')}), pois precisamos de 1h de preparo. ⏰\n\nQue tal amanhã às {next_hours[0][0].strftime('%H:%M')}? ou prefere outro horário? 🥰"
+                    )
+
+                available_now_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in available_now])
+
+                # 🚀 Sugestão explicita de horários para a IA não alucinar
+                # Gera lista de horários a cada 30min dentro dos blocos disponíveis
+                suggested_slots = []
+                for s, e in available_now:
+                    temp_dt = datetime.combine(date_obj, s)
+                    # Round up to next 30min if not perfectly aligned
+                    if temp_dt.minute > 30:
+                        temp_dt = temp_dt.replace(minute=0) + timedelta(hours=1)
+                    elif temp_dt.minute > 0 and temp_dt.minute < 30:
+                        temp_dt = temp_dt.replace(minute=30)
+                    
+                    end_dt = datetime.combine(date_obj, e)
+                    while temp_dt <= end_dt:
+                        slot_time = temp_dt.time()
+                        suggested_slots.append(slot_time.strftime("%H:%M"))
+                        temp_dt += timedelta(minutes=30)
+                
+                suggested_str = " | ".join(suggested_slots)
+                
                 return _format_structured_response(
-                    {"status": "available", "today": True, "available_hours": hours_fmt},
-                    f"✅ Hoje ainda dá! Atendemos até as {business_hours[-1][1].strftime('%H:%M')}.\n\nQue horário funciona melhor? (Lembrando que precisamos de 1h para preparar sua cesta) 🌹"
+                    {
+                        "status": "available", 
+                        "today": True, 
+                        "current_time_campina": now_local.strftime("%H:%M"),
+                        "available_hours_total": hours_fmt,
+                        "available_from_now": available_now_fmt,
+                        "suggested_slots": suggested_slots
+                    },
+                    f"✅ Hoje ainda dá! (Agora são {now_local.strftime('%H:%M')}).\n\n**Opções disponíveis para hoje:**\n{suggested_str}\n\nLembrando que precisamos de 1h para preparar sua cesta. Qual desses horários você prefere? 🌹"
                 )
             
             return _format_structured_response(
-                {"status": "available", "date": date_str, "available_hours": hours_fmt},
+                {
+                    "status": "available", 
+                    "date": date_str, 
+                    "available_hours": hours_fmt,
+                    "current_time_campina": now_local.strftime("%H:%M")
+                },
                 f"✅ {day_name.capitalize()} ({date_obj.strftime('%d/%m')}) é perfeitinho! Atendemos das {hours_fmt}.\n\nQual horário você prefere? 🎁"
             )
     

@@ -488,7 +488,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     
     Cliente: "Caneca personalizada"
     → termo="caneca", precoMaximo=999999
-    → LEMBRE: Mencionar "Temos canecas de pronta entrega e customizáveis (8h produção)"
+    → LEMBRE: Mencionar "Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção)"
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -610,36 +610,8 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
 @mcp.tool()
 async def get_adicionais() -> str:
     """
-    Retorna lista de todos os adicionais (itens extras) disponíveis para complementar cestas.
-    
-    ## WHEN TO USE
-    - Após cliente escolher uma cesta
-    - Cliente quer "incrementar" ou "adicionar algo mais"
-    - Sugerir itens extras para tornar presente mais especial
-    - Cliente pergunta "o que mais posso adicionar?"
-    
-    ## RESPONSE FORMAT
-    JSON estruturado com lista de adicionais:
-    {
-      "status": "found",
-      "adicionais": [
-        {
-          "name": "Nome do adicional",
-          "price": 19.90,
-          "description": "Descrição",
-          "image_url": "URL da imagem"
-        }
-      ]
-    }
-    
-    ## PRESENTATION
-    - Apresente como "Para tornar ainda mais especial" ou similar
-    - Mostre preço de cada adicional
-    - Deixe cliente escolher quais quer adicionar
-    - Não force, apenas sugira naturalmente
-    
-    ## EXAMPLES
-    Cliente escolheu cesta → Sugira: "Quer adicionar algo mais especial? Temos..."
+    Retorna ITENS ADICIONAIS (Balões, Chocolates extras, Ursos, Quadros) para complementar a cesta.
+    Use APÓS o cliente ter escolhido o presente principal ou se ele quiser 'incrementar' o presente.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -651,18 +623,9 @@ async def get_adicionais() -> str:
 @mcp.tool()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
     """
-    Validates delivery availability based on date, time, business hours, and holidays.
-    ⚠️ TIMEZONE SAFE: Converte automaticamente fuso horário da VPS para Campina Grande
-    
-    Returns structured JSON with availability status and humanized message.
-    
-    Business hours:
-    - Monday-Friday: 07:30-12:00, 14:00-17:00
-    - Saturday: 08:00-11:00
-    - Sunday: CLOSED
-    
-    Holidays: Checks against Holiday table (closure_type: full_day or custom)
-    Production time: Minimum 1 hour after confirmation
+    VERIFICA DISPONIBILIDADE de entrega para uma DATA (YYYY-MM-DD) e HORA (HH:MM).
+    Use para validar se podemos entregar no momento que o cliente deseja.
+    Se o cliente não informar a hora, a ferramenta mostra os blocos disponíveis.
     """
     try:
         # Validação de timezone - garante que comparações de data estão corretas
@@ -869,11 +832,9 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
 @mcp.tool()
 async def get_active_holidays() -> str:
     """
-    Returns list of active holidays/closures from database.
-    ⚠️ TIMEZONE SAFE: Sempre usa America/Fortaleza para comparações
-    
-    Returns formatted message with dates when shop is closed.
-    Always uses America/Fortaleza time for reference.
+    Lista DATAS DE FECHAMENTO (Feriados ou folgas) da loja.
+    Use quando o cliente perguntar genericamente 'Vocês vão abrir dia X?' ou para ver feriados próximos.
+    Não use para validar entrega (para isso use validate_delivery_availability).
     """
     pool = await get_db_pool()
     now_local = _get_local_time()
@@ -1018,11 +979,9 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
 @mcp.tool()
 async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True, session_id: Optional[str] = None) -> str:
     """
-    Notifica o suporte humano via WhatsApp com o contexto completo do pedido.
-
-    Validações:
-    - Se o motivo for finalização de pedido, exige que o customer_context contenha: cesta, entrega, endereço e pagamento.
-    - Se o contexto estiver incompleto, retorna mensagem de erro orientando a coletar os dados antes de notificar.
+    TRANSFERE PARA ATENDENTE HUMANO via WhatsApp.
+    Use APENAS no final do checkout ou se houver um problema crítico/solicitação explícita.
+    O context deve conter: Cesta, Data, Endereço, Pagamento e Frete.
     """
     # Validate context for checkout finalization
     reason_lower = (reason or "").lower()
@@ -1111,19 +1070,18 @@ async def _internal_block_session(session_id: str) -> str:
 @mcp.tool()
 async def block_session(session_id: str) -> str:
     """
-    Bloqueia a sessão atual do chat para evitar mensagens automáticas 
-    após a finalização do pedido ou transferência humana.
-    (Pode ser usado em outras situações de extrema relevância)
-    O bloqueio expira automaticamente em 4 dias (345600 segundos).
+    ENCERRA O ATENDIMENTO DA IA para esta sessão.
+    Deve ser chamado OBRIGATORIAMENTE IMEDIATAMENTE APÓS 'notify_human_support'.
+    Isso impede que a Ana continue falando após o humano assumir.
     """
     return await _internal_block_session(session_id)
 
 @mcp.tool()
 async def save_customer_summary(customer_phone: str, summary: str) -> str:
     """
-    Updates the long-term memory summary for a customer.
-    The summary should contain important details like preferences, allergies, or special dates.
-    This memory expires in 15 days.
+    SALVA O STATUS ATUAL DO PEDIDO na memória de longo prazo.
+    Use SEMPRE após avanços importantes (escolheu cesta, deu endereço, etc).
+    Isso evita que a Ana esqueça o que foi combinado se a conversa ficar longa.
     """
     pool = await get_db_pool()
     now_local = _get_local_time()

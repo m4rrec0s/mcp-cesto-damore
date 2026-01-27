@@ -1077,7 +1077,10 @@ async def _internal_block_session(session_id: str) -> str:
     pool = await get_db_pool()
     now_local = _get_local_time()
     # 4 days for expiry
-    expires_at = now_local + timedelta(seconds=345600)
+    # Convert timezone-aware datetime to naive datetime for PostgreSQL timestamp
+    # Prisma uses timestamp without timezone, so we need to remove tzinfo
+    now_naive = now_local.replace(tzinfo=None)
+    expires_at = now_naive + timedelta(seconds=345600)
     
     _safe_print(f" tentando bloquear sessão: {session_id}")
 
@@ -1133,8 +1136,10 @@ async def save_customer_summary(customer_phone: str, summary: str) -> str:
     now_local = _get_local_time()
     async with pool.acquire() as conn:
         try:
-            # Consistent with America/Fortaleza
-            expires_at = now_local + timedelta(days=15)
+            # Convert timezone-aware datetime to naive datetime for PostgreSQL timestamp
+            # Prisma uses timestamp without timezone, so we need to remove tzinfo
+            now_naive = now_local.replace(tzinfo=None)
+            expires_at = now_naive + timedelta(days=15)
             query = """
             INSERT INTO public."CustomerMemory" (id, customer_phone, summary, updated_at, expires_at)
             VALUES (gen_random_uuid(), $1, $2, $3, $4)
@@ -1142,7 +1147,7 @@ async def save_customer_summary(customer_phone: str, summary: str) -> str:
             SET summary = $2, updated_at = $3, expires_at = $4
             RETURNING id;
             """
-            row = await conn.fetchrow(query, customer_phone, summary, now_local, expires_at)
+            row = await conn.fetchrow(query, customer_phone, summary, now_naive, expires_at)
             structured_data = {"status": "success", "customer_phone": customer_phone, "memory_id": str(row['id'])}
             return _format_structured_response(structured_data, f"Memória atualizada para {customer_phone}.")
         except Exception as e:

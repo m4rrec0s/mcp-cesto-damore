@@ -592,7 +592,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             fallback_matches = [r for r in rows if not r['is_exact_match']]
             
             # Check if search is for caneca - add special guidance
-            is_caneca_search = 'caneca' in primary_term.lower()
+            is_caneca_search = 'caneca' in termo.lower()
             caneca_guidance = ""
             if is_caneca_search:
                 caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção). Qual você prefere?"
@@ -601,7 +601,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             structured = {
                 "status": "found" if rows else "not_found",
                 "termo": termo,
-                "termo_processado": primary_term,
+                "termo_processado": termo,
                 "is_caneca_search": is_caneca_search,
                 "caneca_guidance": caneca_guidance,
                 "exatos": [

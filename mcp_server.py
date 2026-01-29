@@ -410,10 +410,6 @@ async def fallback_guideline() -> str:
     """
     return GUIDELINES["fallback"]
 
-# =======================
-# CATALOG & SEARCH TOOLS
-# =======================
-
 @mcp.tool()
 async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: float = 999999, exclude_product_ids: list = None) -> str:
     """
@@ -476,69 +472,120 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            # Parse exclude IDs
+
             exclude_ids = exclude_product_ids if exclude_product_ids else []
             exclude_ids = [str(id) for id in exclude_ids]
-            
-            # 🔑 CRITICAL: Break multi-word search terms into keywords for better matching
-            # "café da manhã" → ["café", "manhã"] (removes common words like "da")
+
             common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
             search_terms = [w.strip() for w in termo.split() if w.strip().lower() not in common_words]
             
-            # If multi-word, use individual terms; otherwise use original term
+            search_terms = list(set(search_terms + [termo]))
+            search_terms = [t for t in search_terms if t.lower().strip()]
+            
             if len(search_terms) > 1:
-                # Multi-word search: try each meaningful word
-                _safe_print(f"🔑 Breaking multi-word search: '{termo}' → {search_terms}")
-                # Use the main keyword (typically the first or longest meaningful term)
-                primary_term = max(search_terms, key=len)
-                _safe_print(f"🎯 Using primary keyword: '{primary_term}'")
-            else:
-                # Single word or empty after filtering: use original term
-                primary_term = termo
+                _safe_print(f"🔑 Breaking multi-word search: '{termo}' → Testing keywords: {search_terms}")
+            all_rows = []
+            search_terms_tested = []
             
-            query = """
-            WITH input_params AS (
-                SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
-            ),
-            products_scored AS (
-              SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
-              (
-                -- Name exact match (highest priority = 100)
-                (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
-                -- Description/Tags content match (medium priority = 50)
-                (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
-                -- Word-boundary matches in tags (lower priority = 30)
-                (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
-              ) as relevance_score,
-              -- is_exact_match: score >= 50 means term is explicitly in name or description
-              (CASE WHEN 
-                p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
-                p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
-               THEN true ELSE false END) as is_exact_match
-              FROM public."Product" p
-              WHERE p.price >= (SELECT preco_minimo FROM input_params) 
-                AND p.price <= (SELECT preco_maximo FROM input_params)
-                AND p.is_active = true
-                AND NOT (p.id::TEXT = ANY($4::TEXT[]))
+            for search_term in search_terms:
+                if not search_term.strip():
+                    continue
+                    
+                search_terms_tested.append(search_term)
+                query = """
+                WITH input_params AS (
+                    SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
+                ),
+                products_scored AS (
+                  SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
+                  (
+                    -- Name exact match (highest priority = 100)
+                    (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
+                    -- Description/Tags content match (medium priority = 50)
+                    (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
+                    -- Word-boundary matches in tags (lower priority = 30)
+                    (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
+                  ) as relevance_score,
+                  -- is_exact_match: score >= 50 means term is explicitly in name or description
+                  (CASE WHEN 
+                    p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
+                    p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
+                   THEN true ELSE false END) as is_exact_match
+                  FROM public."Product" p
+                  WHERE p.price >= (SELECT preco_minimo FROM input_params) 
+                    AND p.price <= (SELECT preco_maximo FROM input_params)
+                    AND p.is_active = true
+                    AND NOT (p.id::TEXT = ANY($4::TEXT[]))
+                )
+                SELECT 
+                  id, name, description, price, image_url, production_time, relevance_score, is_exact_match,
+                  ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
+                FROM products_scored 
+                WHERE relevance_score > 0
+                ORDER BY is_exact_match DESC, ranking ASC
+                LIMIT 10;
+                """
+                
+                _safe_print(f"🔍 Testando termo: '{search_term}'")
+                start_time = lib_time.time()
+                rows = await conn.fetch(query, search_term, precoMaximo, precoMinimo, exclude_ids)
+                duration = lib_time.time() - start_time
+                _safe_print(f"⏱️ termo '{search_term}' retornou {len(rows)} produtos em {duration:.2f}s")
+                
+                # Merge results, avoiding duplicates
+                for row in rows:
+                    # Check if product already in results
+                    if not any(r['id'] == row['id'] for r in all_rows):
+                        all_rows.append(row)
+            
+            # Sort by relevance: exact matches first, then by score
+            all_rows = sorted(
+                all_rows,
+                key=lambda r: (not r['is_exact_match'], -r['relevance_score'], -r['price'])
             )
-            SELECT 
-              id, name, description, price, image_url, production_time, relevance_score, is_exact_match,
-              ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
-            FROM products_scored 
-            WHERE relevance_score > 0
-            ORDER BY is_exact_match DESC, ranking ASC
-            LIMIT 6;
-            """
             
-            _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', termo processado='{primary_term}', preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
+            # Limit to 6 best results
+            rows = all_rows[:6]
             
-            start_time = lib_time.time()
-            rows = await conn.fetch(query, primary_term, precoMaximo, precoMinimo, exclude_ids)
-            duration = lib_time.time() - start_time
-            _safe_print(f"⏱️ query levaram {duration:.2f}s")
+            _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
             
             if not rows:
-                return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
+                # Retry with original term only if multi-word search failed
+                if len(search_terms) > 1:
+                    _safe_print(f"⚠️ Nenhum resultado encontrado. Tentando termo original: '{termo}'")
+                    single_query = """
+                    WITH input_params AS (
+                        SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
+                    ),
+                    products_scored AS (
+                      SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
+                      (
+                        (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
+                        (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
+                        (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
+                      ) as relevance_score,
+                      (CASE WHEN 
+                        p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
+                        p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
+                       THEN true ELSE false END) as is_exact_match
+                      FROM public."Product" p
+                      WHERE p.price >= (SELECT preco_minimo FROM input_params) 
+                        AND p.price <= (SELECT preco_maximo FROM input_params)
+                        AND p.is_active = true
+                        AND NOT (p.id::TEXT = ANY($4::TEXT[]))
+                    )
+                    SELECT 
+                      id, name, description, price, image_url, production_time, relevance_score, is_exact_match,
+                      ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
+                    FROM products_scored 
+                    WHERE relevance_score > 0
+                    ORDER BY is_exact_match DESC, ranking ASC
+                    LIMIT 6;
+                    """
+                    rows = await conn.fetch(single_query, termo, precoMaximo, precoMinimo, exclude_ids)
+                
+                if not rows:
+                    return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
             
             # Separate exact matches from fallback (ranking now is global)
             exact_matches = [r for r in rows if r['is_exact_match']]

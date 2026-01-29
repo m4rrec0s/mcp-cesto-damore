@@ -410,6 +410,127 @@ async def fallback_guideline() -> str:
     """
     return GUIDELINES["fallback"]
 
+def _normalize_product_search_term(termo: str) -> str:
+    """
+    Normaliza termos genéricos de cliente para termos específicos do catálogo.
+    
+    Exemplo: "presentes" → "cesto d'amore" | "flores" → "buquê" | "caneca" → "caneca d'amore"
+    
+    MAPEAMENTO INTELIGENTE:
+    - Cliente diz "presentes" → Busca por "cesto" (oferece várias opções)
+    - Cliente diz "festa" → Busca por "bar" (festas geralmente pedem bar)
+    - Cliente diz "productos" → Busca por "cesto" (genérico)
+    - Cliente diz "cestas" → Busca por "cesto" (específico)
+    - Cliente diz "flores" → Busca por "buquê" (muito comum)
+    - Cliente diz "buquê" → Mantém "buquê" (já específico)
+    - Cliente diz "caneca" → Busca por "caneca d'amore" (específico)
+    - Cliente diz "urso" → Busca por "pelúcia" (categoria)
+    - Cliente diz "quadro" → Busca por "quadro" (específico)
+    - Cliente diz "namorados" → Busca por "coração" (tema)
+    - Cliente diz "aniversário" → Busca por "aniversário d'amore" (específico)
+    - Cliente diz "café" → Busca por "café d'amore" (específico)
+    - Cliente diz "chocolate" → Busca por "chocolate d'amore" (específico)
+    """
+    termo_lower = termo.lower().strip()
+    
+    # Mapeamento de termos genéricos para específicos
+    term_mappings = {
+        # Genéricos para Cestos/Cestas
+        "presentes": "cesto",
+        "presente": "cesto",
+        "products": "cesto",
+        "producto": "cesto",
+        "productos": "cesto",
+        "cestas": "cesto",
+        "cesta": "cesto",
+        "gift": "cesto",
+        "gifts": "cesto",
+        "present": "cesto",
+        
+        # Flores
+        "flores": "buquê",
+        "flora": "buquê",
+        "rosas": "buquê",
+        "rosa": "buquê",
+        "flor": "buquê",
+        
+        # Festas
+        "festa": "bar",
+        "festas": "bar",
+        "party": "bar",
+        "cerveja": "bar",
+        "cervejas": "bar",
+        
+        # Personalizáveis
+        "caneca": "caneca d'amore",
+        "canecas": "caneca d'amore",
+        "urso": "pelúcia",
+        "ursos": "pelúcia",
+        "pelúcia": "pelúcia",
+        "pelúcias": "pelúcia",
+        "pelucia": "pelúcia",
+        "pelúcio": "pelúcia",
+        "teddy": "pelúcia",
+        "quadro": "quadro",
+        "quadros": "quadro",
+        "quebra-cabeça": "quebra-cabeça",
+        "quebra": "quebra-cabeça",
+        "puzzle": "quebra-cabeça",
+        
+        # Temas específicos
+        "namorados": "coração",
+        "coração": "coração",
+        "coracao": "coração",
+        "amor": "coração",
+        "casal": "coração",
+        "casamento": "cesto",
+        "casamentos": "cesto",
+        "formatura": "cesto",
+        "graduação": "cesto",
+        "graduacao": "cesto",
+        
+        # Categorias específicas
+        "aniversário": "aniversário d'amore",
+        "aniversario": "aniversário d'amore",
+        "birthday": "aniversário d'amore",
+        "café": "café d'amore",
+        "cafe": "café d'amore",
+        "chocolate": "chocolate d'amore",
+        "chocolates": "chocolate d'amore",
+        "cone": "cone",
+        
+        # Variações de "mais"
+        "mais": "cesto",  # "Quero mais opções" → busca genérica
+        "mais opções": "cesto",
+        "opções": "cesto",
+        "opcoes": "cesto",
+        "outro": "cesto",
+        "outra": "cesto",
+        "diferente": "cesto",
+    }
+    
+    # Se está no mapeamento, retorna o termo mapeado
+    if termo_lower in term_mappings:
+        mapeado = term_mappings[termo_lower]
+        _safe_print(f"🔄 Normalizado: '{termo}' → '{mapeado}'")
+        return mapeado
+    
+    # Se já é um termo específico, mantém
+    termo_limpo = re.sub(r"[^\w\s]", "", termo_lower).strip()
+    specific_terms = [
+        "cesto", "buquê", "buque", "bar", "caneca", "pelúcia", "pelecia", "quadro",
+        "quebra-cabeça", "quebra", "coração", "coracao", "aniversário", "aniversario",
+        "café", "cafe", "chocolate", "cone"
+    ]
+    
+    if any(specific in termo_limpo for specific in specific_terms):
+        _safe_print(f"✓ Termo específico mantido: '{termo}'")
+        return termo
+    
+    # Fallback: se não conseguir mapear, retorna original
+    _safe_print(f"ℹ️ Termo '{termo}' não mapeado, usando original")
+    return termo
+
 @mcp.tool()
 async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: float = 999999, exclude_product_ids: list = None) -> str:
     """
@@ -472,18 +593,22 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
+            # 🔄 NORMALIZAR TERMO: Mapeia termos genéricos para específicos
+            termo_normalizado = _normalize_product_search_term(termo)
+            if termo_normalizado != termo:
+                _safe_print(f"📝 Termo original: '{termo}' → Normalizado: '{termo_normalizado}'")
 
             exclude_ids = exclude_product_ids if exclude_product_ids else []
             exclude_ids = [str(id) for id in exclude_ids]
 
             common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
-            search_terms = [w.strip() for w in termo.split() if w.strip().lower() not in common_words]
+            search_terms = [w.strip() for w in termo_normalizado.split() if w.strip().lower() not in common_words]
             
-            search_terms = list(set(search_terms + [termo]))
+            search_terms = list(set(search_terms + [termo_normalizado]))
             search_terms = [t for t in search_terms if t.lower().strip()]
             
             if len(search_terms) > 1:
-                _safe_print(f"🔑 Breaking multi-word search: '{termo}' → Testing keywords: {search_terms}")
+                _safe_print(f"🔑 Breaking multi-word search: '{termo_normalizado}' → Testing keywords: {search_terms}")
             all_rows = []
             search_terms_tested = []
             
@@ -582,7 +707,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                     ORDER BY is_exact_match DESC, ranking ASC
                     LIMIT 6;
                     """
-                    rows = await conn.fetch(single_query, termo, precoMaximo, precoMinimo, exclude_ids)
+                    rows = await conn.fetch(single_query, termo_normalizado, precoMaximo, precoMinimo, exclude_ids)
                 
                 if not rows:
                     return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
@@ -592,7 +717,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             fallback_matches = [r for r in rows if not r['is_exact_match']]
             
             # Check if search is for caneca - add special guidance
-            is_caneca_search = 'caneca' in termo.lower()
+            is_caneca_search = 'caneca' in termo_normalizado.lower()
             caneca_guidance = ""
             if is_caneca_search:
                 caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção). Qual você prefere?"
@@ -601,7 +726,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             structured = {
                 "status": "found" if rows else "not_found",
                 "termo": termo,
-                "termo_processado": termo,
+                "termo_processado": termo_normalizado,
                 "is_caneca_search": is_caneca_search,
                 "caneca_guidance": caneca_guidance,
                 "exatos": [

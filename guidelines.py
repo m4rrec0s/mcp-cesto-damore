@@ -142,7 +142,8 @@ Vinho, fitness, frutas, marcas específicas, salgados, sob encomenda.
 
 ### Localização e Frete
 - **Campina Grande**: Entrega gratuita no PIX
-- **Região (até 20km)**: Cobertura variável, especialista confirma
+- **Queimadas, Galante, Puxinanã, São José da Mata**: R$ 15 PIX | R$ 25 Cartão
+- **Outras cidades**: Especialista confirma cobertura e valores
 - **Retirada**: Grátis (atendente passa os detalhes)
 
 ⚠️ **NUNCA calcule frete diretamente**. Sempre diga: "O frete será confirmado pelo nosso atendente no final junto com os dados de pagamento! 💕"
@@ -240,8 +241,8 @@ Entregamos em Campina Grande com frete grátis no PIX e fazemos entregas na regi
 Se o cliente quiser retirar pessoalmente, diga: "Legal! Você pode retirar sua cesta aqui no Jardim Tavares, em Campina Grande. Um atendente especializado vai te passar o endereço exato e horário disponível! 🏪"
 
 ⚠️ **CONSULTA DE COBERTURA EM OUTRAS CIDADES**
-Se perguntarem sobre entrega em cidade específica (ex: João Pessoa, Patos, etc):
-"Fazemos entregas em Campina Grande e região. Para confirmar se entregamos no seu endereço, nosso especialista pode verificar! 💕"
+Se perguntarem sobre entrega em cidade específica:
+"Entregamos em Campina Grande (frete grátis no PIX) e nas cidades vizinhas: Queimadas, Galante, Puxinanã e São José da Mata (R$ 15 PIX | R$ 25 Cartão). Para confirmar entrega em outra localidade, nosso especialista valida! 💕"
 
 ⚠️ **NUNCA FORNEÇA:**
 - ❌ Endereço completo com rua e número (deixe para o atendente humano)
@@ -250,7 +251,7 @@ Se perguntarem sobre entrega em cidade específica (ex: João Pessoa, Patos, etc
 - ❌ Afirme que "entrega" ou "não entrega" em cidades específicas sem consultar o especialista
 
 ## Mensagem Padrão sobre Entrega (use quando cliente perguntar genericamente)
-"Aqui em Campina Grande a entrega é gratuita no PIX! Para outras cidades da região, o especialista confirma a cobertura e o valor do frete no final do atendimento. Você também pode retirar sua cesta diretamente conosco no Jardim Tavares! 🏪\"""",
+"Entregamos em Campina Grande com frete grátis no PIX e também nas cidades vizinhas: Queimadas, Galante, Puxinanã e São José da Mata (R$ 15 PIX | R$ 25 Cartão). Você também pode retirar diretamente conosco em Campina Grande! Para outras localidades, nosso especialista confirma! 💕"
 
     "faq_production": """### ⏱️ FAQ - Tempo de Produção
 **Resposta Padrão:**

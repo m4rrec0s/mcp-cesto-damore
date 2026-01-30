@@ -1152,17 +1152,16 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
     # Cidades vizinhas comuns (normalize accents and lowercase)
     neighbors = ["puxinanã", "puxinana", "lagoa seca", "queimadas", "massaranduba", "lagoa de roça", "lagoa de roca", "esperança", "esperanca"]
     is_neighbor = any(n in city_lower for n in neighbors)
-
     # Robust Campina detection
     if re.search(r"\bcampina\b", city_lower) or "campina grande" in city_lower:
         val = 0.0 if not is_card else 10.0
-        msg = f"Sim! Entrega para Campina Grande é gratuita no PIX e em cidades vizinhas até 20 km por R$ 15,00. Ao fim do atendimento um especialista te explica direitinho 😊" if val == 0 else f"O frete para Campina Grande no cartão é R$ 10,00 🚚. Ao fim do atendimento um especialista te explica direitinho 😊"
+        msg = f"Sim! Entrega para Campina Grande é gratuita no PIX. Temos também entrega em outras cidades: Queimadas, Galante, Puxinanã e São José da Mata por R$ 15,00 PIX. Ao fim do atendimento um especialista te explica tudo direitinho 😊" if val == 0 else f"O frete para Campina Grande no cartão é R$ 10,00 🚚. Ao fim do atendimento um especialista te explica direitinho 😊"
         return msg
     elif is_neighbor:
-        return f"Fazemos entregas para {city} por R$ 15,00 no PIX 💕. Entregamos para Campina Grande de gráça no PIX e em cidades vizinhas até 20 km por R$ 15,00. Ao fim do atendimento um especialista te explica direitinho 😊"
+        return f"Ótimo! Entregamos em {city} por R$ 15,00 no PIX 💕. Entrega em Campina Grande é gratuita no PIX. Nossos especialistas confirmam tudo ao final! 😊"
     else:
         # Fallback para outras cidades ou se não identificado
-        return f"Entregamos para Campina Grande de gráça no PIX e em cidades vizinhas até 20 km por R$ 15,00. Para {city}, ao fim do atendimento um especialista te explica direitinho 😊"
+        return f"Entregamos em Campina Grande (grátis no PIX), Queimadas, Galante, Puxinanã e São José da Mata (R$ 15 PIX). Para {city}, nosso especialista confirma ao final do atendimento! 😊"
 
 @mcp.tool()
 async def get_current_business_hours() -> str:

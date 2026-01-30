@@ -736,7 +736,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                         "nome": r['name'],
                         "preco": float(r['price']),
                         "descricao": r['description'],
-                        "imagem": r['image_url'],
+                        "imagem": r['image_url'] or "https://api.cestodamore.com.br/images/default-product.webp",
                         "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
                         "tipo_resultado": "EXATO",
                         "relevance_score": int(r['relevance_score'])
@@ -750,7 +750,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                         "nome": r['name'],
                         "preco": float(r['price']),
                         "descricao": r['description'],
-                        "imagem": r['image_url'],
+                        "imagem": r['image_url'] or "https://api.cestodamore.com.br/images/default-product.webp",
                         "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
                         "tipo_resultado": "FALLBACK",
                         "relevance_score": int(r['relevance_score'])
@@ -941,17 +941,21 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 
                 # Check if today - need at least 1 hour for production
                 if date_obj == now_local.date():
-                    time_needed = now_local.time().replace(microsecond=0)
-                    min_ready_time = (datetime.combine(date_obj, time_needed) + timedelta(hours=1)).time()
+                    # ⚠️ CRITICAL FIX: Use the CURRENT time (now_local), not the requested time
+                    # The requested_time is WHEN the customer wants delivery
+                    # We need to check if NOW + 1h is BEFORE the requested delivery time
+                    min_ready_time = (now_local + timedelta(hours=1)).time()
                     
                     if requested_time < min_ready_time:
                         return _format_structured_response(
                             {
                                 "status": "unavailable", 
                                 "reason": "insufficient_production_time", 
-                                "minimum_ready_time": min_ready_time.strftime("%H:%M")
+                                "current_time": now_local.strftime("%H:%M"),
+                                "minimum_ready_time": min_ready_time.strftime("%H:%M"),
+                                "requested_time": requested_time.strftime("%H:%M")
                             },
-                            f"⏱️ O prazo está em cima! Nossa cesta leva 1 horinha e estaria pronta por volta das {min_ready_time.strftime('%H:%M')}.\n\nPodemos marcar para esse horário ou um pouco depois? 🎁"
+                            f"⏱️ O prazo está em cima! Agora são {now_local.strftime('%H:%M')}. Nossa cesta leva 1 horinha e estaria pronta por volta das {min_ready_time.strftime('%H:%M')}.\n\nPodemos marcar para esse horário ou um pouco depois? 🎁"
                         )
                 
                 # Time is valid

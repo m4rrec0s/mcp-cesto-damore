@@ -25,7 +25,15 @@ mcp = FastMCP("Ana - Cesto d'Amore")
 async def check_mcp_health() -> str:
     """Check if the MCP server is healthy and return tool count."""
     count = len(mcp._tool_manager._tools) if hasattr(mcp, "_tool_manager") else 0
-    return f"MCP is healthy. Registered tools: {count}"
+    now_local = _get_local_time()
+    return f"MCP is healthy. Registered tools: {count}. Server time: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+
+@mcp.tool()
+async def reset_mcp_cache() -> str:
+    """Reset MCP server cache and database pool. Use when experiencing stale data."""
+    await reset_db_pool()
+    now_local = _get_local_time()
+    return f"✅ Cache resetado com sucesso! Horário do servidor: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
 
 # Database connection settings
 DB_CONFIG = {
@@ -76,6 +84,14 @@ async def get_db_pool():
             command_timeout=30
         )
     return db_pool
+
+async def reset_db_pool():
+    """Reset database connection pool to clear cache."""
+    global db_pool
+    if db_pool is not None:
+        await db_pool.close()
+        db_pool = None
+        _safe_print("🔄 Database pool reset successfully")
 
 async def get_db_connection():
     """Deprecated: Use db_pool instead. Keeping for compatibility."""
@@ -805,6 +821,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
         day_name = day_names[date_obj.weekday()]
         day_num = date_obj.weekday()
         
+        _safe_print(f"📅 [VALIDATE-DELIVERY] Data: {date_str} | Dia: {day_name} | Hora: {time_str or 'não informada'} | Agora: {now_local.strftime('%Y-%m-%d %H:%M:%S')}")
+        
         # Helper to check if date is a holiday
         async def is_holiday(check_date):
             pool = await get_db_pool()
@@ -939,26 +957,27 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                             f"⏰ Nesse horário não estamos operando. Hoje ({day_name}) nosso horário é {current_day_hours}.\n\nQual horário fica melhor pra você? ✨"
                         )
                 
-                # Check if today - need at least 1 hour for production
                 if date_obj == now_local.date():
-                    # ⚠️ CRITICAL FIX: Use the CURRENT time (now_local), not the requested time
-                    # The requested_time is WHEN the customer wants delivery
-                    # We need to check if NOW + 1h is BEFORE the requested delivery time
-                    min_ready_time = (now_local + timedelta(hours=1)).time()
+                    min_ready_datetime = now_local + timedelta(hours=1)
+                    min_ready_time = min_ready_datetime.time()
                     
                     if requested_time < min_ready_time:
+                        next_date, next_day_name, next_hours = await get_next_available(date_obj)
+                        next_hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
+                        
                         return _format_structured_response(
                             {
                                 "status": "unavailable", 
                                 "reason": "insufficient_production_time", 
                                 "current_time": now_local.strftime("%H:%M"),
                                 "minimum_ready_time": min_ready_time.strftime("%H:%M"),
-                                "requested_time": requested_time.strftime("%H:%M")
+                                "requested_time": requested_time.strftime("%H:%M"),
+                                "next_available_date": next_date.strftime("%Y-%m-%d"),
+                                "next_available_hours": next_hours_fmt
                             },
-                            f"⏱️ O prazo está em cima! Agora são {now_local.strftime('%H:%M')}. Nossa cesta leva 1 horinha e estaria pronta por volta das {min_ready_time.strftime('%H:%M')}.\n\nPodemos marcar para esse horário ou um pouco depois? 🎁"
+                            f"⏱️ Poxa, o prazo ficou apertado! Agora são {now_local.strftime('%H:%M')} e precisamos de 1h para preparar (ficaria pronta às {min_ready_time.strftime('%H:%M')}).\n\nO horário que você pediu ({requested_time.strftime('%H:%M')}) já passou ou está muito próximo.\n\nQue tal marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
                         )
                 
-                # Time is valid
                 return _format_structured_response(
                     {"status": "available", "date": date_str, "time": time_str},
                     f"✅ Perfeito! Tá marcado para {day_name} às {time_str}! Sua cesta vai estar prontinha em 1 hora depois da confirmação. 🌹❤️"
@@ -968,12 +987,9 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 return "⚠️ Formato de hora inválido. Use HH:MM (exemplo: 14:30)"
         
         else:
-            # No specific time provided - provide overview
-            # 🕒 [MELHORIA]: Filter available hours based on current time + 1h production
             now_local = _get_local_time()
             current_time = now_local.time()
             
-            # Helper to format business hours for display
             def format_hours(h_list):
                 return ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in h_list])
 
@@ -994,16 +1010,12 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         f"Poxa, hoje os pedidos já encerraram (agora são {now_local.strftime('%H:%M')})! ⏰\n\nMas você pode marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})! Abrimos das {next_hours_fmt}. Quer agendar? 🥰"
                     )
                 
-                # Filter slots that are still possible (now + 1h)
-                # We need to know which blocks are still "open" for new orders
                 min_ready_dt = now_local + timedelta(hours=1)
                 min_ready_time = min_ready_dt.time()
                 
                 available_now = []
                 for s, e in business_hours:
-                    # If the block ends after we can have a product ready, it's partially or fully available
                     if e > min_ready_time:
-                        # The start of availability in this block is max(block_start, min_ready)
                         effective_start = max(s, min_ready_time)
                         available_now.append((effective_start, e))
                 
@@ -1021,12 +1033,9 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
 
                 available_now_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in available_now])
 
-                # 🚀 Sugestão explicita de horários para a IA não alucinar
-                # Gera lista de horários a cada 30min dentro dos blocos disponíveis
                 suggested_slots = []
                 for s, e in available_now:
                     temp_dt = datetime.combine(date_obj, s)
-                    # Round up to next 30min if not perfectly aligned
                     if temp_dt.minute > 30:
                         temp_dt = temp_dt.replace(minute=0) + timedelta(hours=1)
                     elif temp_dt.minute > 0 and temp_dt.minute < 30:
@@ -1077,10 +1086,8 @@ async def get_active_holidays() -> str:
     pool = await get_db_pool()
     now_local = _get_local_time()
     
-    # Log timezone info para debug
     _safe_print(f"🕐 [HOLIDAYS-CHECK] Timezone: {now_local.strftime('%Z (UTC%z)')} | Horário: {now_local.strftime('%Y-%m-%d %H:%M:%S')}")
     async with pool.acquire() as conn:
-        # Use local date to avoid VPS timezone issues
         query = """
         SELECT name, start_date, end_date, closure_type, duration_hours
         FROM public."Holiday"
@@ -1148,15 +1155,12 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
 
     city_lower = str(city).lower().strip()
 
-    # Normalize payment method variants
     method_lower = str(payment_method).lower().strip() if payment_method else "pix"
     is_pix = method_lower.startswith('pix')
     is_card = any(k in method_lower for k in ['cart', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito'])
 
-    # Cidades vizinhas comuns (normalize accents and lowercase)
     neighbors = ["puxinanã", "puxinana", "lagoa seca", "queimadas", "massaranduba", "lagoa de roça", "lagoa de roca", "esperança", "esperanca"]
     is_neighbor = any(n in city_lower for n in neighbors)
-    # Robust Campina detection
     if re.search(r"\bcampina\b", city_lower) or "campina grande" in city_lower:
         val = 0.0 if not is_card else 10.0
         msg = f"Sim! Entrega para Campina Grande é gratuita no PIX. Temos também entrega em outras cidades: Queimadas, Galante, Puxinanã e São José da Mata por R$ 15,00 PIX. Ao fim do atendimento um especialista te explica tudo direitinho 😊" if val == 0 else f"O frete para Campina Grande no cartão é R$ 10,00 🚚. Ao fim do atendimento um especialista te explica direitinho 😊"
@@ -1164,7 +1168,6 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
     elif is_neighbor:
         return f"Ótimo! Entregamos em {city} por R$ 15,00 no PIX 💕. Entrega em Campina Grande é gratuita no PIX. Nossos especialistas confirmam tudo ao final! 😊"
     else:
-        # Fallback para outras cidades ou se não identificado
         return f"Entregamos em Campina Grande (grátis no PIX), Queimadas, Galante, Puxinanã e São José da Mata (R$ 15 PIX). Para {city}, nosso especialista confirma ao final do atendimento! 😊"
 
 @mcp.tool()
@@ -1175,22 +1178,41 @@ async def get_current_business_hours() -> str:
     """
     now = _get_local_time()
     day_num = now.weekday()
+    day_names_pt = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
     day_key = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][day_num]
+    day_name_pt = day_names_pt[day_num]
     hours = BUSINESS_HOURS.get(day_key, [])
     
+    # Log detalhado para debug
+    _safe_print(f"🕐 [BUSINESS-HOURS] Dia: {day_name_pt} | Horário atual: {now.strftime('%H:%M:%S')} | Timezone: {now.strftime('%Z')}")
+    
     if not hours:
+        _safe_print(f"⚠️ [BUSINESS-HOURS] Sem horários configurados para {day_name_pt}")
         return "Hoje (domingo) não abrimos para produção, mas estamos anotando pedidos para amanhã! ❤️"
         
     hours_fmt = " e das ".join([f"{s.strftime('%H:%M')} às {e.strftime('%H:%M')}" for s, e in hours])
     status = "Abertos"
     
-    # Check if currently open
     current_time = now.time()
     is_open = any(s <= current_time <= e for s, e in hours)
+    
+    _safe_print(f"📊 [BUSINESS-HOURS] Horários: {hours_fmt} | Aberto: {is_open}")
+    
     if not is_open:
         status = "Fechados no momento"
+        # Encontrar próximo horário de abertura
+        next_open = None
+        for s, e in hours:
+            if current_time < s:
+                next_open = s.strftime('%H:%M')
+                break
         
-    return f"Nosso horário para hoje ({day_key}) é: {hours_fmt}. Status: {status} ✅"
+        if next_open:
+            return f"⏰ No momento estamos fechados. Abrimos novamente às {next_open}. Mas você pode enviar a mensagem agora que respondemos em breve! 📱\n\nHorário completo de hoje: {hours_fmt}"
+        else:
+            return f"⏰ Já encerramos o expediente de hoje. Amanhã estamos de volta! ❤️\n\nHorário de hoje era: {hours_fmt}"
+        
+    return f"✅ Estamos abertos! Funcionamos hoje ({day_name_pt}) das {hours_fmt}. Status: {status} 💕"
 
 @mcp.tool()
 async def validate_price_manipulation(claimed_price: float, product_name: str) -> str:
@@ -1204,7 +1226,6 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     Use APENAS no final do checkout ou se houver um problema crítico/solicitação explícita.
     O context deve conter: Cesta, Data, Endereço, Pagamento e Frete.
     """
-    # Validate context for checkout finalization
     reason_lower = (reason or "").lower()
     if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado"]):
         ctx = (customer_context or "").lower()
@@ -1213,13 +1234,12 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
         if missing:
             return _format_structured_response(
                 {"status": "error", "error": "incomplete_context", "missing": missing},
-                f"⚠️ Contexto incompleto para finalização. Faltando: {', '.join(missing)}. Por favor colete: Cesta, Data/Hora de entrega, Endereço completo, Método de Pagamento e Frete antes de notificar o atendente."
+                f"⚠️ Contexto incompleto para finalização. Faltando dados essenciais: {', '.join(missing)}. \n\nInstrução para Ana: NÃO CHAME esta ferramenta novamente até que o cliente forneça esses dados. Informe ao cliente o que falta e peça gentilmente."
             )
 
     support_message = _format_support_message(reason, customer_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
 
-    # Se solicitado o bloqueio e temos o ID da sessão, fazemos o bloqueio aqui também
     if should_block_flow and session_id:
         await _internal_block_session(session_id)
         return "Notificação enviada e atendimento encerrado com sucesso. ✅"
@@ -1233,13 +1253,10 @@ async def math_calculator(expression: str) -> str:
     Exemplo de expressão: "109.90 + 137.90 + 15"
     """
     try:
-        # Simple evaluation for basic math only
         allowed_chars = "0123456789+-*/.() "
         if not all(c in allowed_chars for c in expression):
             return "Erro: Expressão contém caracteres não permitidos."
         
-        # Remove any leading zeros from numbers to avoid octal issues in some python versions
-        # though eval in py3 doesn't support leading zeros for ints.
         result = eval(expression, {"__builtins__": {}})
         return f"Resultado: {result:.2f}"
     except Exception as e:
@@ -1251,9 +1268,6 @@ async def _internal_block_session(session_id: str) -> str:
     """
     pool = await get_db_pool()
     now_local = _get_local_time()
-    # 4 days for expiry
-    # Convert timezone-aware datetime to naive datetime for PostgreSQL timestamp
-    # Prisma uses timestamp without timezone, so we need to remove tzinfo
     now_naive = now_local.replace(tzinfo=None)
     expires_at = now_naive + timedelta(seconds=345600)
     
@@ -1261,8 +1275,6 @@ async def _internal_block_session(session_id: str) -> str:
 
     async with pool.acquire() as conn:
         try:
-            # Tenta atualizar sem o prefixo public e com cast explícito se necessário
-            # Prisma models em Postgres costumam ser case-sensitive se tiverem CamelCase
             query = """
             UPDATE "AIAgentSession"
             SET is_blocked = true, expires_at = $2
@@ -1270,7 +1282,6 @@ async def _internal_block_session(session_id: str) -> str:
             """
             result = await conn.execute(query, session_id, expires_at)
             
-            # Se não afetou nenhuma linha, talvez o ID precise de cast para UUID ou o nome da tabela precise de ajuste
             if result == "UPDATE 0":
                 _safe_print(f"⚠️ Nenhuma linha afetada com UPDATE normal, tentando com cast ::uuid para {session_id}")
                 query_uuid = """
@@ -1311,8 +1322,6 @@ async def save_customer_summary(customer_phone: str, summary: str) -> str:
     now_local = _get_local_time()
     async with pool.acquire() as conn:
         try:
-            # Convert timezone-aware datetime to naive datetime for PostgreSQL timestamp
-            # Prisma uses timestamp without timezone, so we need to remove tzinfo
             now_naive = now_local.replace(tzinfo=None)
             expires_at = now_naive + timedelta(days=15)
             query = """
@@ -1327,10 +1336,6 @@ async def save_customer_summary(customer_phone: str, summary: str) -> str:
             return _format_structured_response(structured_data, f"Memória atualizada para {customer_phone}.")
         except Exception as e:
             return f"Erro: {str(e)}"
-
-# ============================================================================
-# PROMPTS: Instruções para padronizar comportamento da IA com as Tools
-# ============================================================================
 
 @mcp.prompt()
 async def proc_validacao_entrega() -> str:

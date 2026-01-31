@@ -868,7 +868,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
             }
             return _format_structured_response(
                 structured_data,
-                f"😔 Aos domingos a gente descansa para estar 100% pra você na segunda! ❤️\n\nQue tal marcar para amanhã ({next_date.strftime('%d/%m')})? Funcionamos das {hours_fmt}. Quer agendar? 🥰"
+                f"😔 Aos domingos a gente descansa para estar 100% pra você na segunda! ❤️\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Funcionamos das {hours_fmt}. Quer agendar? 🥰"
             )
         
         # Check if date is a holiday
@@ -944,7 +944,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                     if is_too_late:
                         return _format_structured_response(
                             {"status": "unavailable", "reason": "after_hours", "requested_time": time_str},
-                            f"Poxa, agora são {time_str} e já estamos fora do horário comercial. ⏰\n\nMas você pode marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})! Nosso horário é das {hours_fmt}. Quer agendar? 🥰"
+                            f"Poxa, agora são {time_str} e já estamos fora do horário comercial. ⏰\n\nMas você pode marcar para {next_day_name} ({next_date.strftime('%d/%m')})! Nosso horário é das {hours_fmt}. Quer agendar? 🥰"
                         )
                     elif is_interval:
                         return _format_structured_response(
@@ -975,7 +975,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                                 "next_available_date": next_date.strftime("%Y-%m-%d"),
                                 "next_available_hours": next_hours_fmt
                             },
-                            f"⏱️ Poxa, o prazo ficou apertado! Agora são {now_local.strftime('%H:%M')} e precisamos de 1h para preparar (ficaria pronta às {min_ready_time.strftime('%H:%M')}).\n\nO horário que você pediu ({requested_time.strftime('%H:%M')}) já passou ou está muito próximo.\n\nQue tal marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
+                            f"⏱️ Poxa, o prazo ficou apertado! Agora são {now_local.strftime('%H:%M')} e precisamos de 1h para preparar (ficaria pronta às {min_ready_time.strftime('%H:%M')}).\n\nO horário que você pediu ({requested_time.strftime('%H:%M')}) já passou ou está muito próximo.\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
                         )
                 
                 return _format_structured_response(
@@ -1007,7 +1007,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                             "reason": "after_hours_today",
                             "current_time_campina": now_local.strftime("%H:%M")
                         },
-                        f"Poxa, hoje os pedidos já encerraram (agora são {now_local.strftime('%H:%M')})! ⏰\n\nMas você pode marcar para amanhã, {next_day_name} ({next_date.strftime('%d/%m')})! Abrimos das {next_hours_fmt}. Quer agendar? 🥰"
+                        f"Poxa, hoje os pedidos já encerraram (agora são {now_local.strftime('%H:%M')})! ⏰\n\nMas você pode marcar para {next_day_name} ({next_date.strftime('%d/%m')})! Abrimos das {next_hours_fmt}. Quer agendar? 🥰"
                     )
                 
                 min_ready_dt = now_local + timedelta(hours=1)
@@ -1188,7 +1188,11 @@ async def get_current_business_hours() -> str:
     
     if not hours:
         _safe_print(f"⚠️ [BUSINESS-HOURS] Sem horários configurados para {day_name_pt}")
-        return "Hoje (domingo) não abrimos para produção, mas estamos anotando pedidos para amanhã! ❤️"
+        # Calcular próximo dia útil
+        next_day = now + datetime.timedelta(days=1)
+        next_day_num = next_day.weekday()
+        next_day_name = day_names_pt[next_day_num]
+        return f"Hoje ({day_name_pt}) não abrimos para produção, mas estamos anotando pedidos para {next_day_name}! ❤️"
         
     hours_fmt = " e das ".join([f"{s.strftime('%H:%M')} às {e.strftime('%H:%M')}" for s, e in hours])
     status = "Abertos"

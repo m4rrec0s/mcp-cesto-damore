@@ -13,12 +13,12 @@ import pytz
 import aiohttp
 from guidelines import GUIDELINES
 
-# Load environment variables
+CAMPINA_GRANDE_TZ = pytz.timezone("America/Fortaleza")
+
 from pathlib import Path
 project_dir = Path(__file__).parent
 load_dotenv(dotenv_path=project_dir / '.env')
 
-# Initialize FastMCP server
 mcp = FastMCP("Ana - Cesto d'Amore")
 
 @mcp.tool()
@@ -35,7 +35,6 @@ async def reset_mcp_cache() -> str:
     now_local = _get_local_time()
     return f"✅ Cache resetado com sucesso! Horário do servidor: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
 
-# Database connection settings
 DB_CONFIG = {
     "host": os.getenv("POSTGRES_HOST"),
     "port": os.getenv("POSTGRES_PORT"),
@@ -44,7 +43,6 @@ DB_CONFIG = {
     "database": os.getenv("POSTGRES_DB"),
 }
 
-# Evolution API settings (WhatsApp)
 EVOLUTION_API_CONFIG = {
     "url": os.getenv("EVOLUTION_API_URL"),
     "key": os.getenv("EVOLUTION_API_KEY"),
@@ -52,10 +50,7 @@ EVOLUTION_API_CONFIG = {
     "chat_id": os.getenv("CHAT_ID"),
 }
 
-# Timezone for Campina Grande
-CAMPINA_GRANDE_TZ = pytz.timezone("America/Fortaleza")  # Brasil/Campina Grande
 
-# Business hours configuration
 BUSINESS_HOURS = {
     "monday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
     "tuesday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
@@ -63,10 +58,8 @@ BUSINESS_HOURS = {
     "thursday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
     "friday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
     "saturday": [(time(8, 0), time(11, 0))],
-    "sunday": [],  # Closed
 }
 
-# Global pool variable
 db_pool = None
 
 async def get_db_pool():
@@ -133,7 +126,7 @@ def _safe_print(message: str) -> None:
     Prepends timestamp in Campina Grande timezone.
     """
     try:
-        now = datetime.now(pytz.timezone("America/Fortaleza")).strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now(CAMPINA_GRANDE_TZ).strftime("%Y-%m-%d %H:%M:%S")
         sys.stderr.write(f"[{now}] {message}\n")
         sys.stderr.flush()
     except:
@@ -148,13 +141,11 @@ def _get_emoji_for_reason(reason: str) -> str:
     """
     reason_lower = reason.lower()
     
-    # Check for finalization keywords
     if any(kw in reason_lower for kw in ["finaliza", "paga", "compra", "pedido", "checkout", "concluído"]):
         return "🟢"
     elif "frete" in reason_lower or "duvida" in reason_lower:
         return "🟡"
     else:
-        # Default: issues requiring attention
         return "🔴"
 
 async def _send_whatsapp_notification(
@@ -179,26 +170,21 @@ async def _send_whatsapp_notification(
                 "message": "Variáveis de ambiente não configuradas"
             }
         
-        # Build Evolution API endpoint
         base_url = EVOLUTION_API_CONFIG['url'].rstrip('/')
         instance = EVOLUTION_API_CONFIG['instance']
         
-        # Evolution API endpoint format: /message/sendText/{instanceName}
         endpoint = f"{base_url}/message/sendText/{instance}"
         
-        # Prepare headers (Evolution API uses 'apikey' not 'Authorization')
         headers = {
             "apikey": EVOLUTION_API_CONFIG['key'],
             "Content-Type": "application/json"
         }
         
-        # Prepare payload
         payload = {
             "number": EVOLUTION_API_CONFIG["chat_id"],
             "text": message
         }
         
-        # Send request
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 endpoint,
@@ -208,7 +194,6 @@ async def _send_whatsapp_notification(
             ) as response:
                 response_text = await response.text()
                 
-                # Try to parse JSON response
                 try:
                     response_data = await response.json()
                 except:
@@ -253,10 +238,8 @@ def _format_support_message(
     nome = customer_name or "Desconhecido"
     numero = customer_phone or "Sem contato"
     
-    # Standard header
     header = f"*AJUDA [{emoji}] - Cliente {nome} - {numero}*"
     
-    # Reason and description
     reason_lower = reason.lower()
     if "finaliza" in reason_lower or "pedido" in reason_lower:
         descricao = "✅ Pedido pronto para finalização humana."
@@ -265,9 +248,7 @@ def _format_support_message(
     else:
         descricao = f"Acionamento: {reason}"
 
-    # Context formatting
     if customer_context and customer_context.strip().lower() != "none":
-        # Clean up and ensure formatting
         contexto = customer_context.strip()
         message = f"{header}\n{descricao}\n\n{contexto}"
     else:
@@ -275,11 +256,6 @@ def _format_support_message(
         
     return message
 
-# =======================
-# MCP PROMPTS (GUIDELINES)
-# =======================
-# Guidelines accessible via MCP protocol prompts/list and prompts/get
-# AI should consult these before important actions
 
 @mcp.prompt()
 async def core_identity_guideline() -> str:
@@ -449,9 +425,7 @@ def _normalize_product_search_term(termo: str) -> str:
     """
     termo_lower = termo.lower().strip()
     
-    # Mapeamento de termos genéricos para específicos
     term_mappings = {
-        # Genéricos para Cestos/Cestas
         "presentes": "cesto",
         "presente": "cesto",
         "products": "cesto",
@@ -463,21 +437,20 @@ def _normalize_product_search_term(termo: str) -> str:
         "gifts": "cesto",
         "present": "cesto",
         
-        # Flores
+        "anuncio": "anuncio",
+        
         "flores": "buquê",
         "flora": "buquê",
         "rosas": "buquê",
         "rosa": "buquê",
         "flor": "buquê",
         
-        # Festas
         "festa": "bar",
         "festas": "bar",
         "party": "bar",
         "cerveja": "bar",
         "cervejas": "bar",
         
-        # Personalizáveis
         "caneca": "caneca d'amore",
         "canecas": "caneca d'amore",
         "urso": "pelúcia",
@@ -493,7 +466,6 @@ def _normalize_product_search_term(termo: str) -> str:
         "quebra": "quebra-cabeça",
         "puzzle": "quebra-cabeça",
         
-        # Temas específicos
         "namorados": "coração",
         "coração": "coração",
         "coracao": "coração",
@@ -505,7 +477,6 @@ def _normalize_product_search_term(termo: str) -> str:
         "graduação": "cesto",
         "graduacao": "cesto",
         
-        # Categorias específicas
         "aniversário": "aniversário d'amore",
         "aniversario": "aniversário d'amore",
         "birthday": "aniversário d'amore",
@@ -515,8 +486,6 @@ def _normalize_product_search_term(termo: str) -> str:
         "chocolates": "chocolate d'amore",
         "cone": "cone",
         
-        # Variações de "mais"
-        "mais": "cesto",  # "Quero mais opções" → busca genérica
         "mais opções": "cesto",
         "opções": "cesto",
         "opcoes": "cesto",
@@ -525,13 +494,11 @@ def _normalize_product_search_term(termo: str) -> str:
         "diferente": "cesto",
     }
     
-    # Se está no mapeamento, retorna o termo mapeado
     if termo_lower in term_mappings:
         mapeado = term_mappings[termo_lower]
         _safe_print(f"🔄 Normalizado: '{termo}' → '{mapeado}'")
         return mapeado
     
-    # Se já é um termo específico, mantém
     termo_limpo = re.sub(r"[^\w\s]", "", termo_lower).strip()
     specific_terms = [
         "cesto", "buquê", "buque", "bar", "caneca", "pelúcia", "pelecia", "quadro",
@@ -543,7 +510,6 @@ def _normalize_product_search_term(termo: str) -> str:
         _safe_print(f"✓ Termo específico mantido: '{termo}'")
         return termo
     
-    # Fallback: se não conseguir mapear, retorna original
     _safe_print(f"ℹ️ Termo '{termo}' não mapeado, usando original")
     return termo
 
@@ -552,13 +518,11 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     """
     Busca produtos no catálogo por termo, com filtros de preço e exclusão de IDs já enviados.
     
-    ## WHEN TO USE
     - Cliente menciona ocasião (aniversário, namorados, casamento, etc)
     - Cliente pede tipo específico de produto (flores, caneca, quadro, pelúcia)
     - Cliente quer "mais opções" ou produtos diferentes
     - Necessário buscar produtos com critérios específicos
     
-    ## PARAMETERS
     - termo: Palavra-chave da busca (ocasião ou tipo de produto)
       Exemplos: "aniversário", "flores", "caneca", "namorados", "simples"
       ⚠️ Se múltiplas palavras forem enviadas, serão quebradas em componentes para busca mais eficaz
@@ -566,7 +530,6 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     - precoMaximo: Preço máximo em R$ (default: 999999)
     - exclude_product_ids: Lista de IDs já mostrados nesta sessão (use sent products list)
     
-    ## RESPONSE FORMAT
     Retorna JSON estruturado com dois arrays:
     {
       "exatos": [...],      // Produtos com match exato no termo (prioridade alta)
@@ -583,7 +546,6 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     - production_time: Horas necessárias para produção
     - tipo_resultado: "EXATO" ou "FALLBACK"
     
-    ## PRESENTATION RULES (CRITICAL)
     1. **SEMPRE priorize produtos "EXATO" sobre "FALLBACK"**
     2. **Mostre exatamente 2 produtos por consulta**
     3. Use o campo `ranking` para ordenar (menor = melhor)
@@ -592,7 +554,6 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
        - Se > 1h: "Precisamos de {production_time} horas para produção"
     5. **Price Fallback**: Se esvaziar com precoMaximo, ofereça buscar sem limite
     
-    ## EXAMPLES
     Cliente: "Quero para aniversário" 
     → termo="aniversário", precoMaximo=999999
     
@@ -609,7 +570,6 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            # 🔄 NORMALIZAR TERMO: Mapeia termos genéricos para específicos
             termo_normalizado = _normalize_product_search_term(termo)
             if termo_normalizado != termo:
                 _safe_print(f"📝 Termo original: '{termo}' → Normalizado: '{termo_normalizado}'")
@@ -673,25 +633,20 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 duration = lib_time.time() - start_time
                 _safe_print(f"⏱️ termo '{search_term}' retornou {len(rows)} produtos em {duration:.2f}s")
                 
-                # Merge results, avoiding duplicates
                 for row in rows:
-                    # Check if product already in results
                     if not any(r['id'] == row['id'] for r in all_rows):
                         all_rows.append(row)
             
-            # Sort by relevance: exact matches first, then by score
             all_rows = sorted(
                 all_rows,
                 key=lambda r: (not r['is_exact_match'], -r['relevance_score'], -r['price'])
             )
             
-            # Limit to 6 best results
             rows = all_rows[:6]
             
             _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
             
             if not rows:
-                # Retry with original term only if multi-word search failed
                 if len(search_terms) > 1:
                     _safe_print(f"⚠️ Nenhum resultado encontrado. Tentando termo original: '{termo}'")
                     single_query = """
@@ -728,17 +683,14 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 if not rows:
                     return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
             
-            # Separate exact matches from fallback (ranking now is global)
             exact_matches = [r for r in rows if r['is_exact_match']]
             fallback_matches = [r for r in rows if not r['is_exact_match']]
             
-            # Check if search is for caneca - add special guidance
             is_caneca_search = 'caneca' in termo_normalizado.lower()
             caneca_guidance = ""
             if is_caneca_search:
                 caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção). Qual você prefere?"
             
-            # Structure results for LLM consumption
             structured = {
                 "status": "found" if rows else "not_found",
                 "termo": termo,
@@ -775,12 +727,10 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 ]
             }
             
-            # Log results
             for r in rows:
                 tipo = "EXATO" if r['is_exact_match'] else "FALLBACK"
                 _safe_print(f"  ✅ [{tipo}] Ranking {r['ranking']}: {r['name']} - R$ {r['price']:.2f}")
             
-            # Return JSON for LLM to parse
             return json.dumps(structured, ensure_ascii=False)
         except Exception as e:
             _safe_print(f"❌ Erro em consultarCatalogo: {e}")
@@ -809,21 +759,18 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
     Você DEVE informar os 'suggested_slots' ao cliente para facilitar a escolha.
     """
     try:
-        # Validação de timezone - garante que comparações de data estão corretas
         date_str_validated, tz_debug = _validate_timezone_safety(date_str)
         _safe_print(tz_debug)
         
         date_obj = datetime.strptime(date_str_validated, "%Y-%m-%d").date()
         now_local = _get_local_time()
         
-        # Days of week: 0=Monday, 6=Sunday
         day_names = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
         day_name = day_names[date_obj.weekday()]
         day_num = date_obj.weekday()
         
         _safe_print(f"📅 [VALIDATE-DELIVERY] Data: {date_str} | Dia: {day_name} | Hora: {time_str or 'não informada'} | Agora: {now_local.strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Helper to check if date is a holiday
         async def is_holiday(check_date):
             pool = await get_db_pool()
             async with pool.acquire() as conn:
@@ -838,7 +785,6 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 result = await conn.fetchrow(query, check_date)
                 return result
         
-        # Helper to get next available business day and hours
         async def get_next_available(current_date):
             next_d = current_date + timedelta(days=1)
             while True:
@@ -846,13 +792,11 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 d_name = day_names[d_num]
                 hours = BUSINESS_HOURS.get(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][d_num], [])
                 
-                # Check if it's not a holiday
                 holiday_check = await is_holiday(next_d)
                 if hours and not holiday_check:
                     return next_d, d_name, hours
                 next_d += timedelta(days=1)
 
-        # Check if Sunday
         if day_num == 6:
             next_date, next_day_name, next_hours = await get_next_available(date_obj)
             hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
@@ -871,7 +815,6 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 f"😔 Aos domingos a gente descansa para estar 100% pra você na segunda! ❤️\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Funcionamos das {hours_fmt}. Quer agendar? 🥰"
             )
         
-        # Check if date is a holiday
         holiday_info = await is_holiday(date_obj)
         if holiday_info:
             next_date, next_day_name, next_hours = await get_next_available(date_obj)
@@ -893,7 +836,6 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 f"😔 No dia {date_obj.strftime('%d/%m')} é {holiday_name} e estamos fechados para aproveitar com a família! ❤️\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Funcionamos das {hours_fmt}. Quer agendar? 🥰"
             )
         
-        # Get business hours for the requested day
         day_key = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][day_num]
         business_hours = BUSINESS_HOURS.get(day_key, [])
         
@@ -912,24 +854,19 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 f"😔 Não abrimos aos {day_name}s. Que tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {hours_fmt}. 🥰"
             )
         
-        # If time_str is provided, validate it
         if time_str:
             try:
                 requested_time = datetime.strptime(time_str, "%H:%M").time()
                 
-                # Check if requested time falls within business hours
                 is_within_hours = any(
                     start <= requested_time <= end 
                     for start, end in business_hours
                 )
                 
-                # Check for intervals or after-hours
                 if not is_within_hours:
-                    # Determine why it's not within hours
                     is_too_early = requested_time < business_hours[0][0]
                     is_too_late = requested_time > business_hours[-1][1]
                     
-                    # Check for lunch interval (if it exists)
                     is_interval = False
                     if len(business_hours) > 1:
                         for i in range(len(business_hours) - 1):
@@ -1141,7 +1078,7 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
     Calcula o frete com base na cidade e método de pagamento.
     Regras:
     - Campina Grande: PIX = R$ 0.00 | Cartão = R$ 10.00
-    - Cidades Vizinhas: PIX = R$ 15.00 | Cartão = Valor definido pelo atendente
+    - Outras cidades: Até 20 km. Detalhes passados ao final.
 
     Validações adicionais:
     - Se cidade estiver ausente, retorna erro estruturado orientando a perguntar ao cliente.
@@ -1154,21 +1091,16 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
         )
 
     city_lower = str(city).lower().strip()
-
     method_lower = str(payment_method).lower().strip() if payment_method else "pix"
-    is_pix = method_lower.startswith('pix')
     is_card = any(k in method_lower for k in ['cart', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito'])
 
-    neighbors = ["puxinanã", "puxinana", "lagoa seca", "queimadas", "massaranduba", "lagoa de roça", "lagoa de roca", "esperança", "esperanca"]
-    is_neighbor = any(n in city_lower for n in neighbors)
     if re.search(r"\bcampina\b", city_lower) or "campina grande" in city_lower:
-        val = 0.0 if not is_card else 10.0
-        msg = f"Sim! Entrega para Campina Grande é gratuita no PIX. Temos também entrega em outras cidades: Queimadas, Galante, Puxinanã e São José da Mata por R$ 15,00 PIX. Ao fim do atendimento um especialista te explica tudo direitinho 😊" if val == 0 else f"O frete para Campina Grande no cartão é R$ 10,00 🚚. Ao fim do atendimento um especialista te explica direitinho 😊"
-        return msg
-    elif is_neighbor:
-        return f"Ótimo! Entregamos em {city} por R$ 15,00 no PIX 💕. Entrega em Campina Grande é gratuita no PIX. Nossos especialistas confirmam tudo ao final! 😊"
-    else:
-        return f"Entregamos em Campina Grande (grátis no PIX), Queimadas, Galante, Puxinanã e São José da Mata (R$ 15 PIX). Para {city}, nosso especialista confirma ao final do atendimento! 😊"
+        if not is_card:
+            return "Sim! Entrega para Campina Grande é gratuita no PIX. Entregamos também em outras cidades até 20 km. Os detalhes de frete serão passados ao fim do atendimento 😊"
+        else:
+            return "O frete para Campina Grande no CARTÃO é R$ 10,00 🚚. Entregamos também em outras cidades até 20 km. Os detalhes de frete serão passados ao fim do atendimento 😊"
+    
+    return "Entregamos em Campina Grande (grátis no PIX) e em outras cidades até 20 km. Os detalhes de frete serão passados ao fim do atendimento 😊"
 
 @mcp.tool()
 async def get_current_business_hours() -> str:
@@ -1183,12 +1115,10 @@ async def get_current_business_hours() -> str:
     day_name_pt = day_names_pt[day_num]
     hours = BUSINESS_HOURS.get(day_key, [])
     
-    # Log detalhado para debug
     _safe_print(f"🕐 [BUSINESS-HOURS] Dia: {day_name_pt} | Horário atual: {now.strftime('%H:%M:%S')} | Timezone: {now.strftime('%Z')}")
     
     if not hours:
         _safe_print(f"⚠️ [BUSINESS-HOURS] Sem horários configurados para {day_name_pt}")
-        # Calcular próximo dia útil
         next_day = now + datetime.timedelta(days=1)
         next_day_num = next_day.weekday()
         next_day_name = day_names_pt[next_day_num]
@@ -1204,7 +1134,6 @@ async def get_current_business_hours() -> str:
     
     if not is_open:
         status = "Fechados no momento"
-        # Encontrar próximo horário de abertura
         next_open = None
         for s, e in hours:
             if current_time < s:

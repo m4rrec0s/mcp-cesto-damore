@@ -1014,6 +1014,91 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
         return f"⚠️ Erro ao validar: {str(e)}"
 
 @mcp.tool()
+async def get_product_details(product_id: str) -> str:
+    """
+    Busca DETALHES COMPLETOS de um produto específico pelo ID.
+    Use para validar informações do produto ANTES de responder ao cliente.
+    
+    - product_id: ID único do produto (retornado por consultarCatalogo)
+    
+    Retorna:
+    - id: ID do produto
+    - nome: Nome completo
+    - preco: Preço atual
+    - descricao: Descrição detalhada (INCLUI COMPONENTES/ITENS DA CESTA)
+    - production_time: Horas de produção
+    - componentes: Lista de items que compõem o produto [{"nome": "...", "quantidade": N}]
+    
+    ⚠️ REGRA CRÍTICA: Sempre leia a descrição E componentes antes de responder sobre o que está na cesta.
+    Exemplo:
+    - Cliente: "Essa cesta tem cerveja?"
+    - Você: [Chama get_product_details com o ID da cesta]
+    - Você: [Lê os componentes e a descrição]
+    - Você: Responde com base nos dados REAIS, não em suposição
+    
+    NUNCA:
+    - Invente componentes não listados
+    - Suponha o que tem na cesta
+    - Diga "não podemos alterar" sem confirmar com o especialista primeiro
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            product_id_str = str(product_id)
+            
+            # Busca dados básicos do produto
+            product_query = """
+            SELECT id, name, description, price, production_time
+            FROM public."Product"
+            WHERE id = $1
+            LIMIT 1;
+            """
+            product_row = await conn.fetchrow(product_query, product_id_str)
+            
+            if not product_row:
+                return json.dumps({
+                    "status": "not_found",
+                    "message": f"Produto com ID {product_id_str} não encontrado"
+                }, ensure_ascii=False)
+            
+            # Busca componentes do produto
+            components_query = """
+            SELECT i.name, pc.quantity
+            FROM public."ProductComponent" pc
+            JOIN public."Item" i ON pc.item_id = i.id
+            WHERE pc.product_id = $1
+            ORDER BY i.name ASC;
+            """
+            component_rows = await conn.fetch(components_query, product_id_str)
+            
+            componentes = [
+                {
+                    "nome": r['name'],
+                    "quantidade": r['quantity']
+                }
+                for r in component_rows
+            ]
+            
+            structured = {
+                "status": "found",
+                "id": str(product_row['id']),
+                "nome": product_row['name'],
+                "preco": float(product_row['price']),
+                "descricao": product_row['description'] or "",
+                "production_time": int(product_row['production_time'] or 0),
+                "componentes": componentes,
+                "_debug": f"Total de {len(componentes)} componentes encontrados"
+            }
+            
+            _safe_print(f"📦 get_product_details: {product_row['name']} | {len(componentes)} componentes")
+            
+            return json.dumps(structured, ensure_ascii=False)
+            
+        except Exception as e:
+            _safe_print(f"❌ Erro em get_product_details: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+@mcp.tool()
 async def get_active_holidays() -> str:
     """
     Lista DATAS DE FECHAMENTO (Feriados ou folgas) da loja.

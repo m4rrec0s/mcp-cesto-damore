@@ -949,34 +949,44 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 
                 min_ready_dt = now_local + timedelta(hours=1)
                 min_ready_time = min_ready_dt.time()
+                ready_time_formatted = min_ready_dt.strftime("%H:%M")
                 
-                available_now = []
+                # Verificar se há slots disponíveis após a produção estar pronta
+                # Busca em TODOS os períodos do dia, não só a partir de agora
+                available_today = []
                 for s, e in business_hours:
+                    # Se o fim do período é depois que ficará pronta, tem slots
                     if e > min_ready_time:
+                        # Começa do horário em que ficará pronta ou do início do período, o que for maior
                         effective_start = max(s, min_ready_time)
-                        available_now.append((effective_start, e))
+                        available_today.append((effective_start, e))
                 
-                if not available_now:
+                # Se não há slots com o horário mínimo, pode oferecer o próximo dia
+                if not available_today:
                      next_date, next_day_name, next_hours = await get_next_available(date_obj)
                      next_hours_fmt = format_hours(next_hours)
                      return _format_structured_response(
                         {
                             "status": "unavailable", 
                             "reason": "no_slots_left_today",
-                            "current_time_campina": now_local.strftime("%H:%M")
+                            "current_time_campina": now_local.strftime("%H:%M"),
+                            "min_ready_time": ready_time_formatted
                         },
-                        f"Hoje não conseguimos mais produzir a tempo (agora são {now_local.strftime('%H:%M')}), pois precisamos de 1h de preparo. ⏰\n\nQue tal amanhã às {next_hours[0][0].strftime('%H:%M')}? ou prefere outro horário? 🥰"
+                        f"Hoje os horários se encerram em breve (agora são {now_local.strftime('%H:%M')} e a cesta ficaria pronta às {ready_time_formatted}). ⏰\n\nQue tal amanhã ({next_day_name}, {next_date.strftime('%d/%m')})? Abrimos desde as {next_hours[0][0].strftime('%H:%M')}. Qual horário funciona melhor? 🥰"
                     )
 
-                available_now_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in available_now])
+                available_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in available_today])
 
                 suggested_slots = []
-                for s, e in available_now:
+                for s, e in available_today:
                     temp_dt = datetime.combine(date_obj, s)
+                    
                     if temp_dt.minute > 30:
                         temp_dt = temp_dt.replace(minute=0) + timedelta(hours=1)
                     elif temp_dt.minute > 0 and temp_dt.minute < 30:
                         temp_dt = temp_dt.replace(minute=30)
+                    elif temp_dt.minute == 0:
+                        pass
                     
                     end_dt = datetime.combine(date_obj, e)
                     while temp_dt <= end_dt:
@@ -984,18 +994,19 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         suggested_slots.append(slot_time.strftime("%H:%M"))
                         temp_dt += timedelta(minutes=30)
                 
-                suggested_str = " | ".join(suggested_slots)
+                suggested_str = " | ".join(suggested_slots[:12])
                 
                 return _format_structured_response(
                     {
                         "status": "available", 
                         "today": True, 
                         "current_time_campina": now_local.strftime("%H:%M"),
+                        "estimated_ready_time": ready_time_formatted,
                         "available_hours_total": hours_fmt,
-                        "available_from_now": available_now_fmt,
+                        "available_from_ready_time": available_fmt,
                         "suggested_slots": suggested_slots
                     },
-                    f"✅ Hoje ainda dá! (Agora são {now_local.strftime('%H:%M')}).\n\n**Opções disponíveis para hoje:**\n{suggested_str}\n\nLembrando que precisamos de 1h para preparar sua cesta. Qual desses horários você prefere? 🌹"
+                    f"Tem como entregar hoje ainda! Sua cesta fica pronta por volta das {ready_time_formatted}! 🎁\n\n**Opções de entrega para hoje:**\n{suggested_str}\n\nQual desses horários você prefere? 🌹"
                 )
             
             return _format_structured_response(

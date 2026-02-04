@@ -218,12 +218,15 @@ Após notificar e bloquear, informe:
 
     "indecision": """## Lidando com Indecisão
 - Apresente sempre 2 opções por vez.
-- Se o cliente pedir "mais opções" pela 3ª vez ou já tiver visto 4+ cestas, envie o **Catálogo Completo**.
+- Se o cliente pedir "mais opções" pela 3ª vez ou já tiver visto 4+ cestas, use a ferramenta `get_full_catalog`.
 
-### Link do Catálogo
-https://wa.me/c/558382163104
+### Quando Usar get_full_catalog
+- Cliente viu 4+ produtos e ainda pede mais
+- Cliente está muito indeciso
+- Cliente quer ver "tudo que tem"
+- Cliente pede explicitamente "catálogo", "cardápio", "menu", "opções e valores"
 
-"Que tal dar uma olhadinha no nosso catálogo completo? Lá tem todas as fotos e preços pra você escolher com calma! 💕\"""",
+"Que tal dar uma olhadinha no nosso catálogo completo? Vou te enviar o link! 💕" [Chame get_full_catalog]""",
 
     "mass_orders": """## Pedidos Corporativos e em Lote
 - Detecte pedidos de ≥ 20 unidades ou orçamento > R$ 1.000.
@@ -294,7 +297,7 @@ Se perguntarem se entregam em uma cidade específica:
 - **Limites:** Apresente OBRIGATORIAMENTE **EXATAMENTE 2 opções** por vez. NUNCA envie 1, 3 ou 4+.
 - **Rápido:** Priorize produtos "Pronta Entrega" se o cliente quiser para "hoje".
 - **Repetição:** Evite repetir produtos que o cliente já viu na conversa. IMPORTANTE: Não exclua automaticamente produtos de buscas anteriores com TERMOS DIFERENTES. Só exclua se o cliente pedir "mais opções" ou "outras" do MESMO termo.
-- **Catálogo:** Após 4 opções apresentadas OU se o cliente pedir preço/valor, envie o link do catálogo completo.
+- **Catálogo:** Após 4 opções apresentadas OU se o cliente pedir explicitamente "catálogo"/"cardápio"/"menu"/"opções e valores"/"lista de preços", use `get_full_catalog`.
 - **VALIDAÇÃO ANTES DE RESPONDER**: Se o cliente questionar características de um produto (ex: "essa cesta tem cerveja?"), SEMPRE:
   1. Chame `get_product_details` com o ID do produto
   2. Leia os componentes REAIS retornados

@@ -770,6 +770,43 @@ async def get_adicionais() -> str:
         return _format_structured_response({"status": "found", "adicionais": adicionais}, humanized)
 
 @mcp.tool()
+async def get_full_catalog() -> str:
+    """
+    Retorna o link do CATÁLOGO COMPLETO do WhatsApp Business.
+    
+    USE QUANDO:
+    - Cliente pedir explicitamente: "catálogo", "cardápio", "menu", "opções e valores"
+    - Cliente quiser ver TODOS os produtos de uma vez
+    - Cliente perguntar "quais produtos vocês têm?"
+    - Cliente pedir "lista de preços"
+    - Cliente já viu 4+ produtos e pede mais opções
+    
+    NÃO USE quando:
+    - Cliente está apenas indeciso entre opções (use consultarCatalogo)
+    - Cliente quer produtos específicos (use consultarCatalogo com termo)
+    
+    FORMATO DE RESPOSTA:
+    Sempre apresente o link com uma mensagem amigável explicando que lá tem todas as fotos e preços.
+    """
+    catalog_url = "https://wa.me/c/558382163104"
+    
+    structured_data = {
+        "status": "success",
+        "catalog_url": catalog_url,
+        "message": "Catálogo completo disponível"
+    }
+    
+    humanized = f"""✨ Aqui está nosso catálogo completo com TODAS as opções e preços! 
+
+{catalog_url}
+
+Lá você consegue ver todas as fotos, descrições e valores. Dá uma olhadinha com calma e me chama se tiver alguma dúvida! 💕"""
+    
+    _safe_print(f"📋 [CATALOG] Enviando catálogo completo para cliente")
+    
+    return _format_structured_response(structured_data, humanized)
+
+@mcp.tool()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
     """
     VERIFICA DISPONIBILIDADE de entrega para uma DATA (YYYY-MM-DD) e HORA (HH:MM).

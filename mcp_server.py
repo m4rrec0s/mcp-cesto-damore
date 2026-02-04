@@ -312,6 +312,26 @@ async def closing_protocol_guideline() -> str:
     return GUIDELINES["closing_protocol"]
 
 @mcp.prompt()
+async def cart_protocol_guideline() -> str:
+    """
+    Protocolo OBRIGATÓRIO quando cliente adiciona produto ao carrinho.
+    
+    USE QUANDO:
+    - Mensagem contém "[Interno] O cliente adicionou um produto ao carrinho pessoal"
+    - Detectar adição de produto ao carrinho
+    
+    ESTE PROMPT CONTÉM:
+    - Sequência obrigatória de ações (informar + notificar + bloquear)
+    - Mensagens exatas para horário ABERTO vs FECHADO
+    - Parâmetros corretos para notify_human_support
+    - Checklist de execução
+    - Exemplos completos
+    
+    ⚠️ CRÍTICO: Este protocolo NÃO pode ser ignorado ou modificado
+    """
+    return GUIDELINES["cart_protocol"]
+
+@mcp.prompt()
 async def customization_guideline() -> str:
     """
     Regras sobre personalização e coleta de fotos.
@@ -1252,8 +1272,24 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
 async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True, session_id: Optional[str] = None) -> str:
     """
     TRANSFERE PARA ATENDENTE HUMANO via WhatsApp.
-    Use APENAS no final do checkout ou se houver um problema crítico/solicitação explícita.
-    O context deve conter: Cesta, Data, Endereço, Pagamento e Frete.
+    
+    USE OBRIGATORIAMENTE quando:
+    1. Cliente adicionar produto ao carrinho pessoal ([Interno] detectado)
+    2. Final do checkout com todos os dados coletados
+    3. Problema crítico ou solicitação explícita de falar com humano
+    
+    PARÂMETROS:
+    - reason: Motivo do acionamento (ex: "Cliente adicionou produto ao carrinho", "Finalização de pedido")
+    - customer_context: Contexto completo da situação
+    - customer_name: Nome do cliente
+    - customer_phone: Telefone do cliente
+    - should_block_flow: true para bloquear fluxo da IA (padrão: true)
+    - session_id: ID da sessão (OBRIGATÓRIO quando should_block_flow=true)
+    
+    REGRAS:
+    - Para finalizações: context deve conter Cesta, Data, Endereço, Pagamento e Frete
+    - Para carrinho: Mencionar que cliente adicionou produto e precisa atendimento especializado
+    - SEMPRE informar horário de atendimento ao cliente se estiver fora do expediente
     """
     reason_lower = (reason or "").lower()
     if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado"]):

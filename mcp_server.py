@@ -662,7 +662,8 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                 key=lambda r: (not r['is_exact_match'], -r['relevance_score'], -r['price'])
             )
             
-            rows = all_rows[:6]
+            # Returns up to 10 products for the IA to have context, but she must display only 2 per message.
+            rows = all_rows[:10]
             
             _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
             
@@ -696,7 +697,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
                     FROM products_scored 
                     WHERE relevance_score > 0
                     ORDER BY is_exact_match DESC, ranking ASC
-                    LIMIT 6;
+                    LIMIT 10;
                     """
                     rows = await conn.fetch(single_query, termo_normalizado, precoMaximo, precoMinimo, exclude_ids)
                 
@@ -1311,25 +1312,33 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     TRANSFERE PARA ATENDENTE HUMANO via WhatsApp.
     
     USE OBRIGATORIAMENTE quando:
-    1. Cliente adicionar produto ao carrinho pessoal ([Interno] detectado)
-    2. Final do checkout com todos os dados coletados
-    3. Problema crítico ou solicitação explícita de falar com humano
+    1. FINAL DO CHECKOUT com todos os dados coletados e confirmados pelo cliente.
+    2. Solicitação explícita de falar com humano que a IA não possa resolver.
+    3. Problema técnico ou erro que impeça o atendimento.
     
     PARÂMETROS:
-    - reason: Motivo do acionamento (ex: "Cliente adicionou produto ao carrinho", "Finalização de pedido")
-    - customer_context: Contexto completo da situação
+    - reason: Motivo do acionamento (ex: "Finalização de pedido", "Dúvida técnica")
+    - customer_context: Resumo completo com Cesta, Data, Endereço e Pagamento.
     - customer_name: Nome do cliente
     - customer_phone: Telefone do cliente
     - should_block_flow: true para bloquear fluxo da IA (padrão: true)
     - session_id: ID da sessão (OBRIGATÓRIO quando should_block_flow=true)
     
     REGRAS:
-    - Para finalizações: context deve conter Cesta, Data, Endereço, Pagamento e Frete
-    - Para carrinho: Mencionar que cliente adicionou produto e precisa atendimento especializado
-    - SEMPRE informar horário de atendimento ao cliente se estiver fora do expediente
+    - ❌ NÃO CHAME para apenas "interesse" ou "gostou". Colete os dados primeiro (Protocolo de Fechamento).
+    - Para finalizações: context deve conter Cesta, Data, Endereço e Pagamento.
+    - SEMPRE informar horário de atendimento ao cliente se estiver fora do expediente.
     """
     reason_lower = (reason or "").lower()
-    if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado"]):
+
+    # Prevenção de abandono precoce (Interesse != Compra)
+    if any(k in reason_lower for k in ["interesse", "gostou", "interessou", "quer saber", "curioso"]):
+         return _format_structured_response(
+                {"status": "error", "error": "premature_handover"},
+                "⚠️ Ana, você está tentando transferir muito cedo! Se o cliente apenas demonstrou interesse ou gostou, pergunte se ele quer levar o produto antes de transferir. O humano só deve ser chamado quando houver intenção Clara de compra e dados coletados."
+            )
+
+    if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado", "carrinho"]):
         ctx = (customer_context or "").lower()
         required = ["cesta", "entrega", "endereço", "pagamento"]
         missing = [r for r in required if r not in ctx]

@@ -728,9 +728,22 @@ async def get_adicionais() -> str:
     """Retorna itens adicionais (Balões, Chocolates, Ursos) para a cesta."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT name, base_price as price, description, image_url FROM public."Item" WHERE type = \'additional\'')
-        adicionais = [{"name": r['name'], "price": float(r['price']), "description": r['description'], "image_url": r['image_url']} for r in rows]
-        humanized = "✨ PARA TORNAR AINDA MAIS ESPECIAL:\n\n" + "".join([f"{i['name']} - R$ {i['price']:.2f}\n" for i in adicionais])
+        # Busca todas as categorias de itens que podem ser adicionados
+        query = """
+            SELECT name, base_price as price, description, image_url, type 
+            FROM public."Item" 
+            WHERE type IN ('additional', 'caneca', 'quadro', 'quebra_cabeca', 'outros')
+            ORDER BY type, name
+        """
+        rows = await conn.fetch(query)
+        adicionais = [{"name": r['name'], "price": float(r['price']), "description": r['description'], "image_url": r['image_url'], "type": r['type']} for r in rows]
+        
+        # Formata a lista de forma simples
+        items_list = ""
+        for i in adicionais:
+            items_list += f"• {i['name']} - R$ {i['price']:.2f}\n"
+            
+        humanized = "✨ PARA TORNAR AINDA MAIS ESPECIAL:\n\n" + items_list
         return _format_structured_response({"status": "found", "adicionais": adicionais}, humanized)
 
 @mcp.tool()

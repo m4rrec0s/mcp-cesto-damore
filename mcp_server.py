@@ -536,56 +536,22 @@ def _normalize_product_search_term(termo: str) -> str:
 @mcp.tool()
 async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: float = 999999, exclude_product_ids: list = None) -> str:
     """
-    Busca produtos no catálogo por termo, com filtros de preço e exclusão de IDs já enviados.
+    Busca produtos por termo (ocasião ou tipo), com filtros de preço.
     
-    - Cliente menciona ocasião (aniversário, namorados, casamento, etc)
-    - Cliente pede tipo específico de produto (flores, caneca, quadro, pelúcia)
-    - Cliente quer "mais opções" ou produtos diferentes
-    - Necessário buscar produtos com critérios específicos
+    Retorna JSON: {"exatos": [], "fallback": []}. Priorize SEMPRE produtos "exatos".
+    Mostre exatamente 2 produtos por vez (ranking menor = melhor).
     
-    - termo: Palavra-chave da busca (ocasião ou tipo de produto)
-      Exemplos: "aniversário", "flores", "caneca", "namorados", "simples"
-      ⚠️ Se múltiplas palavras forem enviadas, serão quebradas em componentes para busca mais eficaz
-    - precoMinimo: Preço mínimo em R$ (default: 0)
-    - precoMaximo: Preço máximo em R$ (default: 999999)
-    - exclude_product_ids: Lista de IDs já mostrados nesta sessão (use sent products list)
+    Campos obrigatórios na apresentação: ID, Nome, Preço, Descrição e Production Time.
+    Se esvaziar busca por preço, ofereça buscar sem limite.
     
-    Retorna JSON estruturado com dois arrays:
-    {
-      "exatos": [...],      // Produtos com match exato no termo (prioridade alta)
-      "fallback": [...]     // Produtos relacionados (prioridade baixa)
-    }
+    - termo = palavra-chave de busca (ex: "aniversário", "flores", "caneca")
+    - preco_maximo = filtro de preço máximo
+    - preco_minimo = filtro de preço mínimo
     
-    Cada produto contém:
-    - ranking: Ordem de relevância (menor número = melhor match)
-    - id: ID único do produto
-    - nome: Nome do produto
-    - preco: Preço em formato float
-    - descricao: Descrição completa
-    - imagem: URL completa da imagem
-    - production_time: Horas necessárias para produção
-    - tipo_resultado: "EXATO" ou "FALLBACK"
-    
-    1. **SEMPRE priorize produtos "EXATO" sobre "FALLBACK"**
-    2. **Mostre exatamente 2 produtos por consulta**
-    3. Use o campo `ranking` para ordenar (menor = melhor)
-    4. **OBRIGATÓRIO**: Inclua production_time na apresentação:
-       - Se ≤ 1h: "Produção imediata no mesmo dia ✅"
-       - Se > 1h: "Precisamos de {production_time} horas para produção"
-    5. **Price Fallback**: Se esvaziar com precoMaximo, ofereça buscar sem limite
-    
-    Cliente: "Quero para aniversário" 
-    → termo="aniversário", precoMaximo=999999
-    
-    Cliente: "Flores baratas" 
-    → termo="flores", precoMaximo=120
-    
-    Cliente: "Mais opções" 
-    → termo=<último termo usado>, exclude_product_ids=[IDs já enviados]
-    
-    Cliente: "Caneca personalizada"
-    → termo="caneca", precoMaximo=999999
-    → LEMBRE: Mencionar "Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção)"
+    Exemplos:
+    - "Aniversário" -> termo="aniversário"
+    - "Flores baratas" -> termo="flores", preco_maximo="120"
+    - "Caneca" -> termo="caneca" (Mencione prazo de 1h ou 18h)
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -759,13 +725,10 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
 
 @mcp.tool()
 async def get_adicionais() -> str:
-    """
-    Retorna ITENS ADICIONAIS (Balões, Chocolates extras, Ursos, Quadros) para complementar a cesta.
-    Use APÓS o cliente ter escolhido o presente principal ou se ele quiser 'incrementar' o presente.
-    """
+    """Retorna itens adicionais (Balões, Chocolates, Ursos) para a cesta."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT name, base_price as price, description, image_url FROM public."Item" WHERE type = \'ADDITIONAL\'')
+        rows = await conn.fetch('SELECT name, base_price as price, description, image_url FROM public."Item" WHERE type = \'additional\'')
         adicionais = [{"name": r['name'], "price": float(r['price']), "description": r['description'], "image_url": r['image_url']} for r in rows]
         humanized = "✨ PARA TORNAR AINDA MAIS ESPECIAL:\n\n" + "".join([f"{i['name']} - R$ {i['price']:.2f}\n" for i in adicionais])
         return _format_structured_response({"status": "found", "adicionais": adicionais}, humanized)
@@ -773,21 +736,7 @@ async def get_adicionais() -> str:
 @mcp.tool()
 async def get_full_catalog() -> str:
     """
-    Retorna o link do CATÁLOGO COMPLETO do WhatsApp Business.
-    
-    USE QUANDO:
-    - Cliente pedir explicitamente: "catálogo", "cardápio", "menu", "opções e valores"
-    - Cliente quiser ver TODOS os produtos de uma vez
-    - Cliente perguntar "quais produtos vocês têm?"
-    - Cliente pedir "lista de preços"
-    - Cliente já viu 4+ produtos e pede mais opções
-    
-    NÃO USE quando:
-    - Cliente está apenas indeciso entre opções (use consultarCatalogo)
-    - Cliente quer produtos específicos (use consultarCatalogo com termo)
-    
-    FORMATO DE RESPOSTA:
-    Sempre apresente o link com uma mensagem amigável explicando que lá tem todas as fotos e preços.
+    Retorna link do Catálogo Completo. Use APENAS se cliente pedir explicitamente ("menu", "catalogo") ou estiver muito indeciso após ver várias opções.
     """
     catalog_url = "https://wa.me/c/558382163104"
     
@@ -810,11 +759,9 @@ Lá você consegue ver todas as fotos, descrições e valores. Dá uma olhadinha
 @mcp.tool()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
     """
-    VERIFICA DISPONIBILIDADE de entrega para uma DATA (YYYY-MM-DD) e HORA (HH:MM).
-    Use para validar se podemos entregar no momento que o cliente deseja.
-    
-    ⚠️ REGRA CRÍTICA: Se o cliente não informar a hora, a ferramenta retornará os blocos disponíveis e uma lista de 'suggested_slots'.
-    Você DEVE informar os 'suggested_slots' ao cliente para facilitar a escolha.
+    Verifica se podemos entregar em Data (YYYY-MM-DD) e Hora (HH:MM).
+    Retorna disponibilidade ou "suggested_slots" (blocos de horário) se hora não for informada.
+    SEMPRE mostre os suggested_slots ao cliente.
     """
     try:
         date_str_validated, tz_debug = _validate_timezone_safety(date_str)
@@ -1085,30 +1032,9 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
 @mcp.tool()
 async def get_product_details(product_id: str) -> str:
     """
-    Busca DETALHES COMPLETOS de um produto específico pelo ID.
-    Use para validar informações do produto ANTES de responder ao cliente.
-    
-    - product_id: ID único do produto (retornado por consultarCatalogo)
-    
-    Retorna:
-    - id: ID do produto
-    - nome: Nome completo
-    - preco: Preço atual
-    - descricao: Descrição detalhada (INCLUI COMPONENTES/ITENS DA CESTA)
-    - production_time: Horas de produção
-    - componentes: Lista de items que compõem o produto [{"nome": "...", "quantidade": N}]
-    
-    ⚠️ REGRA CRÍTICA: Sempre leia a descrição E componentes antes de responder sobre o que está na cesta.
-    Exemplo:
-    - Cliente: "Essa cesta tem cerveja?"
-    - Você: [Chama get_product_details com o ID da cesta]
-    - Você: [Lê os componentes e a descrição]
-    - Você: Responde com base nos dados REAIS, não em suposição
-    
-    NUNCA:
-    - Invente componentes não listados
-    - Suponha o que tem na cesta
-    - Diga "não podemos alterar" sem confirmar com o especialista primeiro
+    Busca nome, preço, descrição e COMPONENTES do produto.
+    OBRIGATÓRIO: Ler 'componentes' antes de responder o que tem na cesta.
+    Não alucine itens não listados.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -1169,11 +1095,7 @@ async def get_product_details(product_id: str) -> str:
 
 @mcp.tool()
 async def get_active_holidays() -> str:
-    """
-    Lista DATAS DE FECHAMENTO (Feriados ou folgas) da loja.
-    Use quando o cliente perguntar genericamente 'Vocês vão abrir dia X?' ou para ver feriados próximos.
-    Não use para validar entrega (para isso use validate_delivery_availability).
-    """
+    """Retorna datas em que a loja estará FECHADA (Feriados)."""
     pool = await get_db_pool()
     now_local = _get_local_time()
     
@@ -1228,16 +1150,7 @@ async def get_active_holidays() -> str:
 
 @mcp.tool()
 async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
-    """
-    Calcula o frete com base na cidade e método de pagamento.
-    Regras:
-    - Campina Grande: PIX = R$ 0.00 | Cartão = R$ 10.00
-    - Outras cidades: Até 20 km. Detalhes passados ao final.
-
-    Validações adicionais:
-    - Se cidade estiver ausente, retorna erro estruturado orientando a perguntar ao cliente.
-    - Normaliza formas escritas de 'cartão' e verifica 'campina' robustamente.
-    """
+    """Calcula frete. Campina Grande=Grátis(PIX) ou R$10(Cartão). Outras=Até 20km."""
     if not city or str(city).strip() == "":
         return _format_structured_response(
             {"status": "error", "error": "missing_city"},
@@ -1258,10 +1171,7 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
 
 @mcp.tool()
 async def get_current_business_hours() -> str:
-    """
-    Returns the business hours for today and the current status (open/closed).
-    Always returns hours in America/Fortaleza (Campina Grande) timezone.
-    """
+    """Retorna horário de funcionamento de hoje e status (Aberto/Fechado)."""
     now = _get_local_time()
     day_num = now.weekday()
     day_names_pt = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
@@ -1309,25 +1219,15 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
 @mcp.tool()
 async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True, session_id: Optional[str] = None) -> str:
     """
-    TRANSFERE PARA ATENDENTE HUMANO via WhatsApp.
+    Transfere para humano. USO OBRIGATÓRIO:
+    1. FIM DO PEDIDO (Todos dados coletados).
+    2. Problema Técnico.
     
-    USE OBRIGATORIAMENTE quando:
-    1. FINAL DO CHECKOUT com todos os dados coletados e confirmados pelo cliente.
-    2. Solicitação explícita de falar com humano que a IA não possa resolver.
-    3. Problema técnico ou erro que impeça o atendimento.
+    reason: motivo (ex: "end_of_checkout").
+    customer_context: Resumo (Cesta, Data, Endereço, Pagamento).
+    should_block_flow: true (stop bot).
     
-    PARÂMETROS:
-    - reason: Motivo do acionamento (ex: "Finalização de pedido", "Dúvida técnica")
-    - customer_context: Resumo completo com Cesta, Data, Endereço e Pagamento.
-    - customer_name: Nome do cliente
-    - customer_phone: Telefone do cliente
-    - should_block_flow: true para bloquear fluxo da IA (padrão: true)
-    - session_id: ID da sessão (OBRIGATÓRIO quando should_block_flow=true)
-    
-    REGRAS:
-    - ❌ NÃO CHAME para apenas "interesse" ou "gostou". Colete os dados primeiro (Protocolo de Fechamento).
-    - Para finalizações: context deve conter Cesta, Data, Endereço e Pagamento.
-    - SEMPRE informar horário de atendimento ao cliente se estiver fora do expediente.
+    NÃO use para "interesse". Apenas COMPRA confirmada.
     """
     reason_lower = (reason or "").lower()
 
@@ -1359,10 +1259,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
 
 @mcp.tool()
 async def math_calculator(expression: str) -> str:
-    """
-    Calculadora para operações matemáticas básicas. Útil para somar produtos e frete.
-    Exemplo de expressão: "109.90 + 137.90 + 15"
-    """
+    """Calculadora simples (ex: "100 + 20")."""
     try:
         allowed_chars = "0123456789+-*/.() "
         if not all(c in allowed_chars for c in expression):
@@ -1641,7 +1538,7 @@ async def proc_validar_horario_funcionamento() -> str:
        "Das 12:00 às 14:00 a gente fica em intervalo, mas já retorna! ⏰"
        
        Se perguntar sobre domingo:
-       "Domingos a gente descansa para estar 100% pra você na segunda! ❤️"
+       "Domingos a gente descansa, mas segunda abrimos cedinho às 7:30! Quer marcar pra lá? ❤️"
     
     NUNCA:
     - Invente horários diferentes dos informados
@@ -1657,7 +1554,7 @@ async def proc_validar_horario_funcionamento() -> str:
     Você: "Domingos a gente descansa, mas segunda abrimos cedinho às 7:30! Quer marcar pra lá? ❤️"
     
     Cliente: "Quero entregar sábado"
-    Você: [Chama validate_delivery_availability('2026-01-11')] e retorna a resposta da tool
+    Você: [Chame validate_delivery_availability('2026-01-11')] e retorna a resposta da tool
     """
     return "Procedimento de validação de horários carregado."
 

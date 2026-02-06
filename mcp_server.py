@@ -763,7 +763,9 @@ async def get_full_catalog() -> str:
 
 {catalog_url}
 
-Lá você consegue ver todas as fotos, descrições e valores. Dá uma olhadinha com calma e me chama se tiver alguma dúvida! 💕"""
+Lá você consegue ver todas as fotos, descrições e valores. Dá uma olhadinha com calma e me chama se tiver alguma dúvida! 💕
+Háa, lembrando que para Campina Grande o frete é GRÁTIS no PIX!
+"""
     
     _safe_print(f"📋 [CATALOG] Enviando catálogo completo para cliente")
     

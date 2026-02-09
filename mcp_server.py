@@ -1237,14 +1237,19 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     Transfere para humano. USO OBRIGATÓRIO:
     1. FIM DO PEDIDO (Todos dados coletados).
     2. Problema Técnico.
+    3. Evento de carrinho (cliente adicionou produto ao carrinho).
     
-    reason: motivo (ex: "end_of_checkout").
-    customer_context: Resumo (Cesta, Data, Endereço, Pagamento).
+    reason: motivo (ex: "end_of_checkout" ou "cart_added").
+    customer_context: Resumo (Cesta, Data, Endereço, Pagamento) ou contexto mínimo para carrinho.
     should_block_flow: true (stop bot).
     
     NÃO use para "interesse". Apenas COMPRA confirmada.
     """
     reason_lower = (reason or "").lower()
+    is_cart_added = any(
+        k in reason_lower
+        for k in ["cart_added", "cart_add", "produto ao carrinho", "adicionou no carrinho"]
+    )
 
     # Prevenção de abandono precoce (Interesse != Compra)
     if any(k in reason_lower for k in ["interesse", "gostou", "interessou", "quer saber", "curioso"]):
@@ -1257,7 +1262,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
         ctx = (customer_context or "").lower()
         required = ["cesta", "entrega", "endereço", "pagamento"]
         missing = [r for r in required if r not in ctx]
-        if missing:
+        if missing and not is_cart_added:
             return _format_structured_response(
                 {"status": "error", "error": "incomplete_context", "missing": missing},
                 f"⚠️ Contexto incompleto para finalização. Faltando dados essenciais: {', '.join(missing)}. \n\nInstrução para Ana: NÃO CHAME esta ferramenta novamente até que o cliente forneça esses dados. Informe ao cliente o que falta e peça gentilmente."

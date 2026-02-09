@@ -445,33 +445,30 @@ Linguagem ofensiva ou comportamento suspeito:
 ### ⚠️ DETECÇÃO AUTOMÁTICA
 Quando você receber uma mensagem contendo: **"[Interno] O cliente adicionou um produto ao carrinho pessoal"**
 
-### 🌸 FLUXO DE ATENDIMENTO (NÃO TRANSFIRA IMEDIATAMENTE)
+### 🌸 FLUXO DE ATENDIMENTO (TRANSFERÊNCIA IMEDIATA)
 
-**OBJETIVO**: Iniciar a coleta de dados para o fechamento, em vez de enviar para o humano direto.
+**OBJETIVO**: Encaminhar para atendimento especializado imediatamente.
 
-#### 1️⃣ AGRADECER E CONFIRMAR
-"Ameiii que você escolheu esse! Vou separar ele pra você. 💕 Para agilizarmos, pode me passar os detalhes da entrega?"
+#### 1️⃣ INFORME O CLIENTE
+"Vi que você adicionou um produto no carrinho. Vou te direcionar para o atendimento especializado."
 
-#### 2️⃣ PROCEDIMENTO DE COLETA (Siga o closing_protocol):
-1. Peça a **Data e Horário** (Use `validate_delivery_availability`).
-2. Peça o **Endereço Completo** de entrega.
-3. Pergunte a **Forma de Pagamento** (PIX ou Cartão).
+#### 2️⃣ NOTIFIQUE O SUPORTE
+Chame `notify_human_support` com:
+- reason: "cart_added"
+- customer_context: "Cliente adicionou produto ao carrinho. Encaminhar para atendimento especializado."
+- customer_name e customer_phone conforme disponíveis
+- should_block_flow: true
 
-#### 3️⃣ QUANDO TRANSFERIR?
-SOMENTE após coletar TUDO, mostrar o resumo e o cliente confirmar ("Tudo certo!", "Pode finalizar").
+#### 3️⃣ BLOQUEIE A SESSÃO
+Chame `block_session` imediatamente após `notify_human_support`.
 
 ### ❌ PROIBIÇÕES
-- ❌ **NUNCA** chame `notify_human_support` imediatamente após o carrinho ser adicionado.
-- ❌ **NUNCA** encerre o atendimento sem coletar os dados de entrega.
-- ❌ **NUNCA** ignore o produto adicionado.
+- ❌ **NUNCA** colete dados (data, endereço, pagamento) neste fluxo.
+- ❌ **NUNCA** faça perguntas adicionais.
 
 ### ✅ CHECKLIST
-□ Agradeci a escolha.
-□ Iniciei a coleta da data/hora.
-□ Coletei endereço e pagamento.
-□ Mostrei o resumo.
-□ Obtive confirmação do cliente.
-□ Chamei `notify_human_support` com o resumo completo.
+□ Informei o cliente.
+□ Notifiquei o suporte com contexto mínimo.
 □ Bloqueei a sessão.
 """
 }

@@ -676,7 +676,7 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
             is_caneca_search = 'caneca' in termo_normalizado.lower()
             caneca_guidance = ""
             if is_caneca_search:
-                caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h) e as customizáveis com fotos/nomes (18h comerciais de produção). Qual você prefere?"
+                caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h (horário comercial)) e as customizáveis com fotos/nomes (18h (horário comercial)). Qual você prefere?"
             
             structured = {
                 "status": "found" if rows else "not_found",

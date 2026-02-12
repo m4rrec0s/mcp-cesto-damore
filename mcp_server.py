@@ -534,7 +534,14 @@ def _normalize_product_search_term(termo: str) -> str:
     return termo
 
 @mcp.tool()
-async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: float = 999999, exclude_product_ids: list = None) -> str:
+async def consultarCatalogo(
+    termo: str,
+    precoMinimo: float = 0,
+    precoMaximo: float = 999999,
+    exclude_product_ids: list = None,
+    preco_minimo: float = None,
+    preco_maximo: float = None,
+) -> str:
     """
     Busca produtos por termo (ocasião ou tipo), com filtros de preço.
     
@@ -556,6 +563,11 @@ async def consultarCatalogo(termo: str, precoMinimo: float = 0, precoMaximo: flo
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
+            if preco_minimo is not None:
+                precoMinimo = preco_minimo
+            if preco_maximo is not None:
+                precoMaximo = preco_maximo
+
             termo_normalizado = _normalize_product_search_term(termo)
             if termo_normalizado != termo:
                 _safe_print(f"📝 Termo original: '{termo}' → Normalizado: '{termo_normalizado}'")

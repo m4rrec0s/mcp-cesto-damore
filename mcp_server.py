@@ -536,38 +536,34 @@ def _normalize_product_search_term(termo: str) -> str:
 @mcp.tool()
 async def consultarCatalogo(
     termo: str,
-    precoMinimo: float = 0,
-    precoMaximo: float = 999999,
+    preco_minimo: float = 0,
+    preco_maximo: float = 999999,
     exclude_product_ids: list = None,
-    preco_minimo: float = None,
-    preco_maximo: float = None,
 ) -> str:
     """
     Busca produtos por termo (ocasião ou tipo), com filtros de preço.
-    
+
     Retorna JSON: {"exatos": [], "fallback": []}. Priorize SEMPRE produtos "exatos".
     Mostre exatamente 2 produtos por vez (ranking menor = melhor).
-    
+
     Campos obrigatórios na apresentação: ID, Nome, Preço, Descrição e Production Time.
     Se esvaziar busca por preço, ofereça buscar sem limite.
-    
-    - termo = palavra-chave de busca (ex: "aniversário", "flores", "caneca")
-    - preco_maximo = filtro de preço máximo
-    - preco_minimo = filtro de preço mínimo
-    
+
+    Args:
+        termo: palavra-chave de busca (ex: "aniversário", "flores", "caneca")
+        preco_minimo: preco minimo em reais. Use quando cliente diz "a partir de R$ X" (padrao: 0)
+        preco_maximo: preco maximo em reais. Use quando cliente diz "até R$ X" ou "barato" (padrao: 999999)
+        exclude_product_ids: IDs de produtos a excluir (já apresentados ao cliente)
+
     Exemplos:
-    - "Aniversário" -> termo="aniversário"
-    - "Flores baratas" -> termo="flores", preco_maximo="120"
-    - "Caneca" -> termo="caneca" (Mencione prazo de 1h ou 18h)
+        - "Aniversário" -> termo="aniversário"
+        - "Flores baratas" -> termo="flores", preco_maximo=120
+        - "Cestas até 200" -> termo="cesto", preco_maximo=200
+        - "Caneca" -> termo="caneca"
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            if preco_minimo is not None:
-                precoMinimo = preco_minimo
-            if preco_maximo is not None:
-                precoMaximo = preco_maximo
-
             termo_normalizado = _normalize_product_search_term(termo)
             if termo_normalizado != termo:
                 _safe_print(f"📝 Termo original: '{termo}' → Normalizado: '{termo_normalizado}'")
@@ -627,7 +623,7 @@ async def consultarCatalogo(
                 
                 _safe_print(f"🔍 Testando termo: '{search_term}'")
                 start_time = lib_time.time()
-                rows = await conn.fetch(query, search_term, precoMaximo, precoMinimo, exclude_ids)
+                rows = await conn.fetch(query, search_term, preco_maximo, preco_minimo, exclude_ids)
                 duration = lib_time.time() - start_time
                 _safe_print(f"⏱️ termo '{search_term}' retornou {len(rows)} produtos em {duration:.2f}s")
                 
@@ -643,7 +639,7 @@ async def consultarCatalogo(
             # Returns up to 10 products for the IA to have context, but she must display only 2 per message.
             rows = all_rows[:10]
             
-            _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{precoMinimo}-{precoMaximo}], exclude={len(exclude_ids)} IDs")
+            _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{preco_minimo}-{preco_maximo}], exclude={len(exclude_ids)} IDs")
             
             if not rows:
                 if len(search_terms) > 1:
@@ -677,7 +673,7 @@ async def consultarCatalogo(
                     ORDER BY is_exact_match DESC, ranking ASC
                     LIMIT 10;
                     """
-                    rows = await conn.fetch(single_query, termo_normalizado, precoMaximo, precoMinimo, exclude_ids)
+                    rows = await conn.fetch(single_query, termo_normalizado, preco_maximo, preco_minimo, exclude_ids)
                 
                 if not rows:
                     return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
@@ -783,12 +779,61 @@ Háa, lembrando que para Campina Grande o frete é GRÁTIS no PIX!
     
     return _format_structured_response(structured_data, humanized)
 
+
+def _calculate_ready_datetime(
+    start_dt: datetime,
+    production_hours: int,
+    business_hours_map: dict
+) -> tuple:
+    """
+    Calculate when a product will be ready, walking through business hour blocks.
+    Properly handles the 12:00-14:00 gap and multi-day production.
+    Returns (ready_date, ready_time).
+    """
+    remaining = float(production_hours)
+    current_date = start_dt.date()
+    current_time_val = start_dt.time()
+    day_names_en = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    
+    for _ in range(30):  # max 30 days lookahead
+        day_key = day_names_en[current_date.weekday()]
+        blocks = business_hours_map.get(day_key, [])
+        
+        for block_start, block_end in blocks:
+            effective_start = block_start if current_time_val <= block_start else current_time_val
+            if effective_start >= block_end:
+                continue
+            
+            available_hours = (
+                datetime.combine(current_date, block_end) - 
+                datetime.combine(current_date, effective_start)
+            ).total_seconds() / 3600.0
+            
+            if remaining <= available_hours:
+                ready_dt = datetime.combine(current_date, effective_start) + timedelta(hours=remaining)
+                return current_date, ready_dt.time()
+            
+            remaining -= available_hours
+        
+        current_date += timedelta(days=1)
+        current_time_val = time(0, 0)
+    
+    # Fallback - should not normally reach here
+    return current_date, time(8, 0)
+
+
 @mcp.tool()
-async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None) -> str:
+async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None, production_time_hours: Optional[int] = None) -> str:
     """
     Verifica se podemos entregar em Data (YYYY-MM-DD) e Hora (HH:MM).
-    Retorna disponibilidade ou "suggested_slots" (blocos de horário) se hora não for informada.
+    Retorna disponibilidade ou "suggested_slots" (blocos de horario) se hora nao for informada.
     SEMPRE mostre os suggested_slots ao cliente.
+
+    Args:
+        date_str: Data desejada no formato YYYY-MM-DD
+        time_str: Hora desejada no formato HH:MM (opcional)
+        production_time_hours: Tempo de producao do produto em horas comerciais (opcional, padrao: 1).
+                               Passe o production_time do produto consultado via consultarCatalogo ou get_product_details.
     """
     try:
         date_str_validated, tz_debug = _validate_timezone_safety(date_str)
@@ -927,29 +972,33 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         )
                 
                 if date_obj == now_local.date():
-                    min_ready_datetime = now_local + timedelta(hours=1)
-                    min_ready_time = min_ready_datetime.time()
+                    prod_hours = production_time_hours or 1
+                    ready_date, ready_time_val = _calculate_ready_datetime(now_local, prod_hours, BUSINESS_HOURS)
+                    min_ready_time = ready_time_val
                     
-                    if requested_time < min_ready_time:
+                    if ready_date > date_obj or requested_time < min_ready_time:
                         next_date, next_day_name, next_hours = await get_next_available(date_obj)
                         next_hours_fmt = ", ".join([f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in next_hours])
+                        ready_info = f"{ready_date.strftime('%d/%m')} às {ready_time_val.strftime('%H:%M')}" if ready_date > date_obj else f"às {ready_time_val.strftime('%H:%M')}"
                         
                         return _format_structured_response(
                             {
                                 "status": "unavailable", 
                                 "reason": "insufficient_production_time", 
                                 "current_time": now_local.strftime("%H:%M"),
-                                "minimum_ready_time": min_ready_time.strftime("%H:%M"),
+                                "production_time_hours": prod_hours,
+                                "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
+                                "estimated_ready_time": ready_time_val.strftime("%H:%M"),
                                 "requested_time": requested_time.strftime("%H:%M"),
                                 "next_available_date": next_date.strftime("%Y-%m-%d"),
                                 "next_available_hours": next_hours_fmt
                             },
-                            f"⏱️ Poxa, o prazo ficou apertado! Agora são {now_local.strftime('%H:%M')} e precisamos de 1h para preparar (ficaria pronta às {min_ready_time.strftime('%H:%M')}).\n\nO horário que você pediu ({requested_time.strftime('%H:%M')}) já passou ou está muito próximo.\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
+                            f"⏱️ Poxa, o prazo ficou apertado! Agora são {now_local.strftime('%H:%M')} e precisamos de {prod_hours}h comerciais para preparar (ficaria pronta {ready_info}).\n\nO horário que você pediu ({requested_time.strftime('%H:%M')}) não é viável.\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
                         )
                 
                 return _format_structured_response(
-                    {"status": "available", "date": date_str, "time": time_str},
-                    f"✅ Perfeito! Tá marcado para {day_name} às {time_str}! Sua cesta vai estar prontinha em 1 hora depois da confirmação. 🌹❤️"
+                    {"status": "available", "date": date_str, "time": time_str, "production_time_hours": production_time_hours or 1},
+                    f"✅ Perfeito! Tá marcado para {day_name} às {time_str}! Sua cesta vai estar prontinha após {production_time_hours or 1}h comerciais de produção. 🌹❤️"
                 )
             
             except ValueError:
@@ -980,8 +1029,27 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                     )
                 
                 min_ready_dt = now_local + timedelta(hours=1)
-                min_ready_time = min_ready_dt.time()
-                ready_time_formatted = min_ready_dt.strftime("%H:%M")
+                prod_hours = production_time_hours or 1
+                ready_date, ready_time_val = _calculate_ready_datetime(now_local, prod_hours, BUSINESS_HOURS)
+                min_ready_time = ready_time_val
+                ready_time_formatted = ready_time_val.strftime("%H:%M")
+                
+                # If product can't be ready today, suggest next available day
+                if ready_date > date_obj:
+                    next_date, next_day_name, next_hours = await get_next_available(date_obj)
+                    next_hours_fmt = format_hours(next_hours)
+                    return _format_structured_response(
+                        {
+                            "status": "unavailable",
+                            "reason": "production_exceeds_today",
+                            "production_time_hours": prod_hours,
+                            "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
+                            "estimated_ready_time": ready_time_formatted,
+                            "next_available_date": next_date.strftime("%Y-%m-%d"),
+                            "next_available_hours": next_hours_fmt
+                        },
+                        f"Esse produto precisa de {prod_hours}h comerciais de produção e não dá tempo pra hoje! ⏰\n\nFicaria pronto {next_day_name} ({ready_date.strftime('%d/%m')}) às {ready_time_formatted}. Quer agendar? 🥰"
+                    )
                 
                 # Verificar se há slots disponíveis após a produção estar pronta
                 # Busca em TODOS os períodos do dia, não só a partir de agora
@@ -1033,21 +1101,33 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         "status": "available", 
                         "today": True, 
                         "current_time_campina": now_local.strftime("%H:%M"),
+                        "production_time_hours": prod_hours,
                         "estimated_ready_time": ready_time_formatted,
                         "available_hours_total": hours_fmt,
                         "available_from_ready_time": available_fmt,
                         "suggested_slots": suggested_slots
                     },
-                    f"Tem como entregar hoje ainda! Sua cesta fica pronta por volta das {ready_time_formatted}! 🎁\n\n**Opções de entrega para hoje:**\n{suggested_str}\n\nQual desses horários você prefere? 🌹"
+                    f"Tem como entregar hoje ainda! Com produção de {prod_hours}h comerciais, fica pronta por volta das {ready_time_formatted}! 🎁\n\n**Opções de entrega para hoje:**\n{suggested_str}\n\nQual desses horários você prefere? 🌹"
                 )
             
+            # Future date
+            prod_hours = production_time_hours or 1
+            ready_date, ready_time_val = _calculate_ready_datetime(now_local, prod_hours, BUSINESS_HOURS)
+            response_data = {
+                "status": "available", 
+                "date": date_str, 
+                "available_hours": hours_fmt,
+                "current_time_campina": now_local.strftime("%H:%M"),
+                "production_time_hours": prod_hours,
+                "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
+                "estimated_ready_time": ready_time_val.strftime("%H:%M")
+            }
+            
+            if ready_date > date_obj:
+                response_data["warning"] = f"Produção de {prod_hours}h pode não ficar pronta antes de {date_str}"
+            
             return _format_structured_response(
-                {
-                    "status": "available", 
-                    "date": date_str, 
-                    "available_hours": hours_fmt,
-                    "current_time_campina": now_local.strftime("%H:%M")
-                },
+                response_data,
                 f"✅ {day_name.capitalize()} ({date_obj.strftime('%d/%m')}) é perfeitinho! Atendemos das {hours_fmt}.\n\nQual horário você prefere? 🎁"
             )
     

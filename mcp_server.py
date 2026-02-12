@@ -170,7 +170,7 @@ async def _send_whatsapp_notification(
                 "message": "Variáveis de ambiente não configuradas"
             }
         
-        base_url = EVOLUTION_API_CONFIG['url'].rstrip('/')
+        base_url = (EVOLUTION_API_CONFIG['url'] or "").rstrip('/')
         instance = EVOLUTION_API_CONFIG['instance']
         
         endpoint = f"{base_url}/message/sendText/{instance}"
@@ -200,10 +200,17 @@ async def _send_whatsapp_notification(
                     response_data = {"raw": response_text}
                 
                 if response.status in [200, 201]:
+                    message_id = None
+                    if isinstance(response_data, dict):
+                        message_block = response_data.get("message", {})
+                        if isinstance(message_block, dict):
+                            key_block = message_block.get("key", {})
+                            if isinstance(key_block, dict):
+                                message_id = key_block.get("id")
                     return {
                         "success": True,
                         "status_code": response.status,
-                        "message_id": response_data.get("message", {}).get("key", {}).get("id"),
+                        "message_id": message_id,
                         "response": response_data,
                         "endpoint_used": endpoint
                     }
@@ -538,7 +545,7 @@ async def consultarCatalogo(
     termo: str,
     preco_minimo: float = 0,
     preco_maximo: float = 999999,
-    exclude_product_ids: list = None,
+    exclude_product_ids: Optional[List[str]] = None,
 ) -> str:
     """
     Busca produtos por termo (ocasião ou tipo), com filtros de preço.
@@ -674,6 +681,47 @@ async def consultarCatalogo(
                     LIMIT 10;
                     """
                     rows = await conn.fetch(single_query, termo_normalizado, preco_maximo, preco_minimo, exclude_ids)
+
+                if not rows and exclude_ids:
+                    _safe_print("🔁 Fallback: tentando sem exclusões")
+                    rows = await conn.fetch(single_query, termo_normalizado, preco_maximo, preco_minimo, [])
+
+                if not rows:
+                    term_lower = termo_normalizado.lower()
+                    fallback_terms = []
+                    if any(t in term_lower for t in ["cesto", "cesta", "presente"]):
+                        fallback_terms.append("cesto")
+                    if any(t in term_lower for t in ["buquê", "buque", "flores", "rosa"]):
+                        fallback_terms.append("buquê")
+                    if "caneca" in term_lower:
+                        fallback_terms.append("caneca")
+                    if any(t in term_lower for t in ["romant", "românt", "namorad"]):
+                        fallback_terms.extend(["romântica", "namorados"])
+                    if "anivers" in term_lower:
+                        fallback_terms.append("aniversário")
+                    if "bar" in term_lower:
+                        fallback_terms.append("bar")
+                    if "chocolate" in term_lower:
+                        fallback_terms.append("chocolate")
+                    if any(t in term_lower for t in ["pelucia", "pelúcia", "urso"]):
+                        fallback_terms.append("pelúcia")
+                    if "quebra" in term_lower:
+                        fallback_terms.append("quebra-cabeça")
+                    if "quadro" in term_lower:
+                        fallback_terms.append("quadro")
+
+                    fallback_terms = list(dict.fromkeys([t for t in fallback_terms if t]))
+                    for fallback_term in fallback_terms:
+                        _safe_print(f"🔁 Fallback: tentando termo similar '{fallback_term}'")
+                        rows = await conn.fetch(
+                            single_query,
+                            fallback_term,
+                            preco_maximo,
+                            preco_minimo,
+                            [],
+                        )
+                        if rows:
+                            break
                 
                 if not rows:
                     return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
@@ -1290,7 +1338,7 @@ async def get_current_business_hours() -> str:
     
     if not hours:
         _safe_print(f"⚠️ [BUSINESS-HOURS] Sem horários configurados para {day_name_pt}")
-        next_day = now + datetime.timedelta(days=1)
+        next_day = now + timedelta(days=1)
         next_day_num = next_day.weekday()
         next_day_name = day_names_pt[next_day_num]
         return f"Hoje ({day_name_pt}) não abrimos para produção, mas estamos anotando pedidos para {next_day_name}! ❤️"

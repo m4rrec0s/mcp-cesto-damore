@@ -304,7 +304,7 @@ Para a retirada pessoalmente ou endereço exato, nosso atendente especializado p
 
 ⚠️ **INFORMAÇÕES DE RETIRADA**
 Se o cliente quiser retirar pessoalmente:
-"Legal! Você pode retirar sua cesta aqui em Campina Grande, PB. Um atendente especializado vai te passar o endereço exato, bairro e horário disponível! 🏪"
+"Legal! Você pode retirar sua cesta aqui em Campina Grande, PB. O horário de retirada segue os mesmos horarios das entregas. Um atendente especializado vai te passar o endereço exato, bairro e horário disponível! 🏪"
 
 ⚠️ **CONSULTA DE COBERTURA EM OUTRAS CIDADES**
 Se perguntarem se entregam em uma cidade específica:

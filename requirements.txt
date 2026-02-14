@@ -6,3 +6,4 @@ pytz
 aiohttp
 fastapi
 uvicorn
+openai

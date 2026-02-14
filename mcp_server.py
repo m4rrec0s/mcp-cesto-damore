@@ -4,6 +4,8 @@ import json
 import sys
 import re
 import time as lib_time
+import math
+from hashlib import sha256
 from typing import Optional, List, Dict, Any, Union
 from fastmcp import FastMCP
 import asyncpg
@@ -11,6 +13,7 @@ from dotenv import load_dotenv
 from datetime import datetime, time, timedelta
 import pytz
 import aiohttp
+from openai import OpenAI
 from guidelines import GUIDELINES
 
 CAMPINA_GRANDE_TZ = pytz.timezone("America/Fortaleza")
@@ -20,6 +23,14 @@ project_dir = Path(__file__).parent
 load_dotenv(dotenv_path=project_dir / '.env')
 
 mcp = FastMCP("Ana - Cesto d'Amore")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+EMBEDDING_CACHE: Dict[str, List[float]] = {}
+PRODUCT_EMBEDDINGS: Dict[str, Dict[str, Any]] = {}
+EMBEDDING_TABLE_READY = False
 
 @mcp.tool()
 async def check_mcp_health() -> str:
@@ -32,6 +43,8 @@ async def check_mcp_health() -> str:
 async def reset_mcp_cache() -> str:
     """Reset MCP server cache and database pool. Use when experiencing stale data."""
     await reset_db_pool()
+    EMBEDDING_CACHE.clear()
+    PRODUCT_EMBEDDINGS.clear()
     now_local = _get_local_time()
     return f"✅ Cache resetado com sucesso! Horário do servidor: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
 
@@ -131,6 +144,307 @@ def _safe_print(message: str) -> None:
         sys.stderr.flush()
     except:
         pass
+
+def _hash_text(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()
+
+async def _ensure_embedding_table() -> None:
+    global EMBEDDING_TABLE_READY
+    if EMBEDDING_TABLE_READY:
+        return
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public."EmbeddingCache" (
+                id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+                embedding_type TEXT NOT NULL,
+                embedding_hash TEXT NOT NULL,
+                product_id TEXT NULL,
+                text_content TEXT NULL,
+                model TEXT NOT NULL,
+                vector JSONB NOT NULL,
+                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                UNIQUE (embedding_type, embedding_hash)
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS embeddingcache_type_hash_idx
+            ON public."EmbeddingCache" (embedding_type, embedding_hash);
+            """
+        )
+    EMBEDDING_TABLE_READY = True
+
+async def _fetch_cached_embeddings(
+    embedding_type: str,
+    hashes: List[str],
+) -> Dict[str, List[float]]:
+    if not hashes:
+        return {}
+
+    await _ensure_embedding_table()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT embedding_hash, vector
+            FROM public."EmbeddingCache"
+            WHERE embedding_type = $1
+              AND embedding_hash = ANY($2::TEXT[])
+            """,
+            embedding_type,
+            hashes,
+        )
+
+    results: Dict[str, List[float]] = {}
+    for row in rows:
+        vector = row["vector"]
+        if isinstance(vector, list):
+            results[str(row["embedding_hash"])] = [float(v) for v in vector]
+    return results
+
+async def _store_embedding_records(records: List[Dict[str, Any]]) -> None:
+    if not records:
+        return
+
+    await _ensure_embedding_table()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO public."EmbeddingCache"
+                (embedding_type, embedding_hash, product_id, text_content, model, vector, updated_at)
+            VALUES
+                ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+            ON CONFLICT (embedding_type, embedding_hash)
+            DO UPDATE SET
+                product_id = EXCLUDED.product_id,
+                text_content = EXCLUDED.text_content,
+                model = EXCLUDED.model,
+                vector = EXCLUDED.vector,
+                updated_at = NOW();
+            """,
+            [
+                (
+                    r["embedding_type"],
+                    r["embedding_hash"],
+                    r.get("product_id"),
+                    r.get("text_content"),
+                    r["model"],
+                    json.dumps(r["vector"], ensure_ascii=False),
+                )
+                for r in records
+            ],
+        )
+
+async def _prune_product_embeddings(records: List[Dict[str, Any]]) -> None:
+    if not records:
+        return
+
+    to_prune = []
+    for record in records:
+        if record.get("embedding_type") != "product":
+            continue
+        product_id = record.get("product_id")
+        embedding_hash = record.get("embedding_hash")
+        if product_id and embedding_hash:
+            to_prune.append((product_id, embedding_hash))
+
+    if not to_prune:
+        return
+
+    await _ensure_embedding_table()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            DELETE FROM public."EmbeddingCache"
+            WHERE embedding_type = 'product'
+              AND product_id = $1
+              AND embedding_hash <> $2;
+            """,
+            to_prune,
+        )
+
+def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = math.sqrt(sum(a * a for a in vec1))
+    norm2 = math.sqrt(sum(b * b for b in vec2))
+    if norm1 == 0.0 or norm2 == 0.0:
+        return 0.0
+    return float(dot / (norm1 * norm2))
+
+def _softmax(scores: List[float], temperature: float) -> List[float]:
+    temp = max(0.05, float(temperature))
+    scaled = [s / temp for s in scores]
+    max_val = max(scaled) if scaled else 0.0
+    exp_scores = [math.exp(s - max_val) for s in scaled]
+    total = sum(exp_scores) or 1.0
+    return [s / total for s in exp_scores]
+
+def _build_product_text(product: Dict[str, Any]) -> str:
+    parts = [
+        str(product.get("name") or ""),
+        str(product.get("description") or ""),
+    ]
+    return ". ".join([p for p in parts if p]).strip()
+
+def _parse_price_value(raw_value: str) -> Optional[float]:
+    if not raw_value:
+        return None
+    cleaned = re.sub(r"[^0-9,\.]", "", raw_value)
+    if not cleaned:
+        return None
+    if "," in cleaned and "." in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+def _extract_price_bounds(text: str) -> tuple[Optional[float], Optional[float]]:
+    if not text:
+        return None, None
+    text_lower = text.lower()
+    text_lower = text_lower.replace("r$", "r$")
+
+    range_match = re.search(
+        r"(entre|de)\s*r?\$?\s*([\d\.,]+)\s*(e|a)\s*r?\$?\s*([\d\.,]+)",
+        text_lower,
+    )
+    if range_match:
+        min_val = _parse_price_value(range_match.group(2))
+        max_val = _parse_price_value(range_match.group(4))
+        return min_val, max_val
+
+    max_match = re.search(
+        r"(ate|até|no\s*maximo|no\s*máximo|menos\s*de)\s*r?\$?\s*([\d\.,]+)",
+        text_lower,
+    )
+    if max_match:
+        max_val = _parse_price_value(max_match.group(2))
+        return None, max_val
+
+    min_match = re.search(
+        r"(a\s*partir\s*de|minimo|minimo|min\.?|acima\s*de)\s*r?\$?\s*([\d\.,]+)",
+        text_lower,
+    )
+    if min_match:
+        min_val = _parse_price_value(min_match.group(2))
+        return min_val, None
+
+    return None, None
+
+async def _get_embeddings(texts: List[str]) -> List[List[float]]:
+    client = openai_client
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY not configured")
+
+    def _call():
+        return client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+
+    response = await asyncio.to_thread(_call)
+    return [item.embedding for item in response.data]
+
+async def _get_embedding_cached(text: str) -> List[float]:
+    key = text.strip()
+    if not key:
+        return []
+    if key in EMBEDDING_CACHE:
+        return EMBEDDING_CACHE[key]
+    key_hash = _hash_text(key)
+    cached = await _fetch_cached_embeddings("query", [key_hash])
+    if key_hash in cached:
+        EMBEDDING_CACHE[key] = cached[key_hash]
+        return cached[key_hash]
+
+    embeddings = await _get_embeddings([key])
+    EMBEDDING_CACHE[key] = embeddings[0]
+    await _store_embedding_records(
+        [
+            {
+                "embedding_type": "query",
+                "embedding_hash": key_hash,
+                "product_id": None,
+                "text_content": key[:1000],
+                "model": EMBEDDING_MODEL,
+                "vector": embeddings[0],
+            }
+        ]
+    )
+    return embeddings[0]
+
+async def _ensure_product_embeddings(products: List[Dict[str, Any]]) -> None:
+    to_embed: List[Dict[str, Any]] = []
+    hashes: List[str] = []
+    product_hash_map: Dict[str, Dict[str, Any]] = {}
+
+    for product in products:
+        product_id = str(product.get("id"))
+        text = _build_product_text(product)
+        text_hash = _hash_text(text)
+        product_hash_map[text_hash] = {
+            "id": product_id,
+            "text": text,
+            "hash": text_hash,
+        }
+        hashes.append(text_hash)
+
+        cached = PRODUCT_EMBEDDINGS.get(product_id)
+        if cached and cached.get("hash") == text_hash:
+            continue
+
+        to_embed.append({"id": product_id, "text": text, "hash": text_hash})
+
+    cached_db = await _fetch_cached_embeddings("product", hashes)
+    for text_hash, embedding in cached_db.items():
+        product_info = product_hash_map.get(text_hash)
+        if product_info:
+            PRODUCT_EMBEDDINGS[product_info["id"]] = {
+                "embedding": embedding,
+                "hash": text_hash,
+            }
+
+    to_embed = [
+        item
+        for item in to_embed
+        if item["hash"] not in cached_db
+    ]
+
+    if not to_embed:
+        return
+
+    batch_size = 64
+    for i in range(0, len(to_embed), batch_size):
+        batch = to_embed[i : i + batch_size]
+        texts = [b["text"] for b in batch]
+        embeddings = await _get_embeddings(texts)
+        records = []
+        for item, embedding in zip(batch, embeddings):
+            PRODUCT_EMBEDDINGS[item["id"]] = {
+                "embedding": embedding,
+                "hash": item["hash"],
+            }
+            records.append(
+                {
+                    "embedding_type": "product",
+                    "embedding_hash": item["hash"],
+                    "product_id": item["id"],
+                    "text_content": item["text"][:1000],
+                    "model": EMBEDDING_MODEL,
+                    "vector": embedding,
+                }
+            )
+        await _prune_product_embeddings(records)
+        await _store_embedding_records(records)
 
 def _get_emoji_for_reason(reason: str) -> str:
     """
@@ -543,9 +857,14 @@ def _normalize_product_search_term(termo: str) -> str:
 @mcp.tool()
 async def consultarCatalogo(
     termo: str,
-    preco_minimo: float = 0,
-    preco_maximo: float = 999999,
+    preco_minimo: Optional[float] = None,
+    preco_maximo: Optional[float] = None,
     exclude_product_ids: Optional[List[str]] = None,
+    contexto: Optional[str] = None,
+    use_semantic: Optional[bool] = None,
+    temperature: Optional[float] = None,
+    min_similarity: Optional[float] = None,
+    top_k: Optional[int] = None,
 ) -> str:
     """
     Busca produtos por termo (ocasião ou tipo), com filtros de preço.
@@ -561,6 +880,11 @@ async def consultarCatalogo(
         preco_minimo: preco minimo em reais. Use quando cliente diz "a partir de R$ X" (padrao: 0)
         preco_maximo: preco maximo em reais. Use quando cliente diz "até R$ X" ou "barato" (padrao: 999999)
         exclude_product_ids: IDs de produtos a excluir (já apresentados ao cliente)
+        contexto: contexto adicional do cliente (ocasiao, preferencia, etc)
+        use_semantic: se true, aplica ranking semantico por embeddings (padrao: true)
+        temperature: controla o "rank de temperatura" (padrao: 0.35)
+        min_similarity: limiar para classificar como EXATO (padrao: 0.18)
+        top_k: maximo de produtos retornados (padrao: 10)
 
     Exemplos:
         - "Aniversário" -> termo="aniversário"
@@ -577,6 +901,168 @@ async def consultarCatalogo(
 
             exclude_ids = exclude_product_ids if exclude_product_ids else []
             exclude_ids = [str(id) for id in exclude_ids]
+
+            contexto_limpo = (contexto or "").strip()
+            price_source = f"{termo_normalizado} {contexto_limpo}".strip()
+            ctx_min, ctx_max = _extract_price_bounds(price_source)
+
+            if preco_minimo is None:
+                preco_minimo = ctx_min if ctx_min is not None else 0.0
+            if preco_maximo is None:
+                preco_maximo = ctx_max if ctx_max is not None else 999999.0
+
+            if ctx_min is not None and preco_minimo < ctx_min:
+                preco_minimo = ctx_min
+            if ctx_max is not None and preco_maximo > ctx_max:
+                preco_maximo = ctx_max
+
+            if preco_minimo > preco_maximo:
+                preco_minimo, preco_maximo = preco_maximo, preco_minimo
+
+            use_semantic_search = (
+                True if use_semantic is None else bool(use_semantic)
+            ) and openai_client is not None
+            temperature = float(temperature) if temperature is not None else 0.35
+            min_similarity = float(min_similarity) if min_similarity is not None else 0.18
+            top_k = int(top_k) if top_k else 10
+            top_k = max(2, min(10, top_k))
+
+            if use_semantic_search:
+                try:
+                    query = """
+                    SELECT id, name, description, price, image_url, production_time
+                    FROM public."Product"
+                    WHERE price >= $1
+                      AND price <= $2
+                      AND is_active = true
+                      AND NOT (id::TEXT = ANY($3::TEXT[]))
+                    """
+                    rows = await conn.fetch(query, preco_minimo, preco_maximo, exclude_ids)
+
+                    if rows:
+                        products = [dict(r) for r in rows]
+                        await _ensure_product_embeddings(products)
+
+                        query_text = termo_normalizado
+                        if contexto_limpo:
+                            query_text = f"{query_text}. {contexto_limpo}"
+
+                        query_embedding = await _get_embedding_cached(query_text)
+
+                        scored = []
+                        termo_lower = termo_normalizado.lower().strip()
+                        for product in products:
+                            product_id = str(product.get("id"))
+                            cached = PRODUCT_EMBEDDINGS.get(product_id, {})
+                            embedding = cached.get("embedding")
+                            similarity = (
+                                _cosine_similarity(query_embedding, embedding)
+                                if embedding
+                                else 0.0
+                            )
+                            name = (product.get("name") or "").lower()
+                            description = (product.get("description") or "").lower()
+                            lexical_match = termo_lower in name or termo_lower in description
+                            scored.append(
+                                {
+                                    **product,
+                                    "similarity": similarity,
+                                    "lexical_match": lexical_match,
+                                }
+                            )
+
+                        scored.sort(
+                            key=lambda p: (p["similarity"], float(p.get("price") or 0.0)),
+                            reverse=True,
+                        )
+
+                        temperature_scores = _softmax(
+                            [p["similarity"] for p in scored], temperature
+                        )
+                        for idx, item in enumerate(scored):
+                            item["temperature_score"] = temperature_scores[idx]
+                            item["ranking"] = idx + 1
+
+                        scored = scored[:top_k]
+
+                        exact_matches = [
+                            p
+                            for p in scored
+                            if p["similarity"] >= min_similarity or p["lexical_match"]
+                        ]
+                        fallback_matches = [
+                            p
+                            for p in scored
+                            if p not in exact_matches
+                        ]
+
+                        is_caneca_search = "caneca" in termo_lower
+                        caneca_guidance = ""
+                        if is_caneca_search:
+                            caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h (horário comercial)) e as customizáveis com fotos/nomes (18h (horário comercial)). Qual você prefere?"
+
+                        structured = {
+                            "status": "found" if scored else "not_found",
+                            "termo": termo,
+                            "termo_processado": termo_normalizado,
+                            "contexto": contexto_limpo,
+                            "is_caneca_search": is_caneca_search,
+                            "caneca_guidance": caneca_guidance,
+                            "exatos": [
+                                {
+                                    "ranking": p["ranking"],
+                                    "id": str(p["id"]),
+                                    "nome": p["name"],
+                                    "preco": float(p["price"]),
+                                    "descricao": p["description"],
+                                    "imagem": p.get("image_url")
+                                    or "https://api.cestodamore.com.br/images/default-product.webp",
+                                    "production_time": int(p["production_time"])
+                                    if p.get("production_time") is not None
+                                    else 1,
+                                    "tipo_resultado": "EXATO",
+                                    "relevance_score": int(p["similarity"] * 1000),
+                                    "temperature_score": round(
+                                        float(p["temperature_score"]), 6
+                                    ),
+                                }
+                                for p in exact_matches
+                            ],
+                            "fallback": [
+                                {
+                                    "ranking": p["ranking"],
+                                    "id": str(p["id"]),
+                                    "nome": p["name"],
+                                    "preco": float(p["price"]),
+                                    "descricao": p["description"],
+                                    "imagem": p.get("image_url")
+                                    or "https://api.cestodamore.com.br/images/default-product.webp",
+                                    "production_time": int(p["production_time"])
+                                    if p.get("production_time") is not None
+                                    else 1,
+                                    "tipo_resultado": "FALLBACK",
+                                    "relevance_score": int(p["similarity"] * 1000),
+                                    "temperature_score": round(
+                                        float(p["temperature_score"]), 6
+                                    ),
+                                }
+                                for p in fallback_matches
+                            ],
+                        }
+
+                        for p in scored:
+                            tipo = (
+                                "EXATO"
+                                if p in exact_matches
+                                else "FALLBACK"
+                            )
+                            _safe_print(
+                                f"  ✅ [{tipo}] Ranking {p['ranking']}: {p['name']} - R$ {float(p['price']):.2f} (sim={p['similarity']:.3f})"
+                            )
+
+                        return json.dumps(structured, ensure_ascii=False)
+                except Exception as e:
+                    _safe_print(f"⚠️ Falha no ranking semântico, usando busca lexical: {e}")
 
             common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
             search_terms = [w.strip() for w in termo_normalizado.split() if w.strip().lower() not in common_words]

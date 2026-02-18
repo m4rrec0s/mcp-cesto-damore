@@ -880,7 +880,7 @@ async def consultarCatalogo(
         preco_minimo: preco minimo em reais. Use quando cliente diz "a partir de R$ X" (padrao: 0)
         preco_maximo: preco maximo em reais. Use quando cliente diz "até R$ X" ou "barato" (padrao: 999999)
         exclude_product_ids: IDs de produtos a excluir (já apresentados ao cliente)
-        contexto: contexto adicional do cliente (ocasiao, preferencia, etc)
+        contexto: Contexto COMPLETO da necessidade do cliente (ex: "presente de aniversário para namorada que gosta de chocolates e fotos"). NÃO use apenas uma palavra aqui. Use a frase do cliente para melhor RAG.
         use_semantic: se true, aplica ranking semantico por embeddings (padrao: true)
         temperature: controla o "rank de temperatura" (padrao: 0.35)
         min_similarity: limiar para classificar como EXATO (padrao: 0.18)
@@ -962,11 +962,24 @@ async def consultarCatalogo(
                             )
                             name = (product.get("name") or "").lower()
                             description = (product.get("description") or "").lower()
-                            lexical_match = termo_lower in name or termo_lower in description
+                            lexical_match = (
+                                termo_lower in name or 
+                                termo_lower in description
+                            )
+
+                            boost = 0.0
+                            if any(kw in name or kw in description for kw in ["quadro", "polaroide", "foto", "instax", "polaróide"]):
+                                boost += 0.04
+                            elif any(kw in name or kw in description for kw in ["caneca"]):
+                                boost -= 0.02
+                            
+                            adjusted_similarity = similarity + boost
+                            
                             scored.append(
                                 {
                                     **product,
-                                    "similarity": similarity,
+                                    "similarity": adjusted_similarity,
+                                    "original_similarity": similarity,
                                     "lexical_match": lexical_match,
                                 }
                             )

@@ -5,6 +5,8 @@ import sys
 import re
 import time as lib_time
 import math
+import unicodedata
+from difflib import SequenceMatcher
 from hashlib import sha256
 from typing import Optional, List, Dict, Any, Union
 from fastmcp import FastMCP
@@ -30,7 +32,18 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 EMBEDDING_CACHE: Dict[str, List[float]] = {}
 PRODUCT_EMBEDDINGS: Dict[str, Dict[str, Any]] = {}
+QUERY_COMPATIBILITY_INDEX: Dict[str, Dict[str, Any]] = {}
+QUERY_COMPATIBILITY_DB_LOADED = False
 EMBEDDING_TABLE_READY = False
+
+QUERY_COMPATIBILITY_THRESHOLD = float(os.getenv("QUERY_COMPATIBILITY_THRESHOLD", "0.86"))
+QUERY_COMPATIBILITY_MAX_ITEMS = int(os.getenv("QUERY_COMPATIBILITY_MAX_ITEMS", "600"))
+QUERY_COMPATIBILITY_DB_LOOKBACK = int(os.getenv("QUERY_COMPATIBILITY_DB_LOOKBACK", "400"))
+QUERY_STOPWORDS = {
+    "a", "as", "o", "os", "de", "da", "do", "das", "dos", "e", "ou", "em", "no", "na",
+    "nos", "nas", "por", "para", "pra", "pro", "com", "sem", "um", "uma", "uns", "umas",
+    "que", "quero", "queria", "gostaria", "me", "te", "se", "ao", "aos", "à", "às"
+}
 
 @mcp.tool()
 async def check_mcp_health() -> str:
@@ -45,6 +58,9 @@ async def reset_mcp_cache() -> str:
     await reset_db_pool()
     EMBEDDING_CACHE.clear()
     PRODUCT_EMBEDDINGS.clear()
+    QUERY_COMPATIBILITY_INDEX.clear()
+    global QUERY_COMPATIBILITY_DB_LOADED
+    QUERY_COMPATIBILITY_DB_LOADED = False
     now_local = _get_local_time()
     return f"✅ Cache resetado com sucesso! Horário do servidor: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
 
@@ -147,6 +163,134 @@ def _safe_print(message: str) -> None:
 
 def _hash_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
+
+def _normalize_embedding_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text.lower())
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+def _tokenize_context(text: str) -> List[str]:
+    normalized = _normalize_embedding_text(text)
+    return [
+        token for token in normalized.split(" ")
+        if token and token not in QUERY_STOPWORDS and len(token) > 2
+    ]
+
+def _context_compatibility_score(source_text: str, candidate_text: str) -> float:
+    source_norm = _normalize_embedding_text(source_text)
+    candidate_norm = _normalize_embedding_text(candidate_text)
+    if not source_norm or not candidate_norm:
+        return 0.0
+
+    sequence_score = SequenceMatcher(None, source_norm, candidate_norm).ratio()
+    source_tokens = set(_tokenize_context(source_text))
+    candidate_tokens = set(_tokenize_context(candidate_text))
+
+    if source_tokens and candidate_tokens:
+        intersection = len(source_tokens.intersection(candidate_tokens))
+        union = len(source_tokens.union(candidate_tokens)) or 1
+        jaccard = intersection / union
+        containment = intersection / max(1, min(len(source_tokens), len(candidate_tokens)))
+    else:
+        jaccard = 0.0
+        containment = 0.0
+
+    return (0.50 * sequence_score) + (0.35 * jaccard) + (0.15 * containment)
+
+def _remember_query_embedding(text: str, embedding_hash: str, embedding: List[float]) -> None:
+    normalized = _normalize_embedding_text(text)
+    if not normalized:
+        return
+
+    QUERY_COMPATIBILITY_INDEX[normalized] = {
+        "hash": embedding_hash,
+        "text": text,
+        "embedding": embedding,
+    }
+
+    if len(QUERY_COMPATIBILITY_INDEX) > QUERY_COMPATIBILITY_MAX_ITEMS:
+        oldest_key = next(iter(QUERY_COMPATIBILITY_INDEX.keys()))
+        QUERY_COMPATIBILITY_INDEX.pop(oldest_key, None)
+
+async def _fetch_recent_query_embedding_records(limit: int = QUERY_COMPATIBILITY_DB_LOOKBACK) -> List[Dict[str, Any]]:
+    await _ensure_embedding_table()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT embedding_hash, text_content, vector
+            FROM public."EmbeddingCache"
+            WHERE embedding_type = 'query'
+              AND text_content IS NOT NULL
+              AND text_content <> ''
+            ORDER BY updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+
+    records: List[Dict[str, Any]] = []
+    for row in rows:
+        vector = row["vector"]
+        try:
+            if isinstance(vector, str):
+                vector = json.loads(vector)
+            if isinstance(vector, list):
+                records.append(
+                    {
+                        "embedding_hash": str(row["embedding_hash"]),
+                        "text_content": str(row["text_content"]),
+                        "vector": [float(v) for v in vector],
+                    }
+                )
+        except Exception as e:
+            _safe_print(f"⚠️ Error parsing query embedding from DB: {e}")
+    return records
+
+async def _load_query_compatibility_index() -> None:
+    global QUERY_COMPATIBILITY_DB_LOADED
+    if QUERY_COMPATIBILITY_DB_LOADED:
+        return
+
+    try:
+        records = await _fetch_recent_query_embedding_records()
+        for record in records:
+            _remember_query_embedding(
+                record["text_content"],
+                record["embedding_hash"],
+                record["vector"],
+            )
+        _safe_print(f"🧠 Índice de compatibilidade carregado com {len(QUERY_COMPATIBILITY_INDEX)} contextos")
+    except Exception as e:
+        _safe_print(f"⚠️ Falha ao carregar índice de compatibilidade: {e}")
+    finally:
+        QUERY_COMPATIBILITY_DB_LOADED = True
+
+async def _find_compatible_query_embedding(text: str, embedding_hash: str) -> Optional[Dict[str, Any]]:
+    await _load_query_compatibility_index()
+
+    best_match: Optional[Dict[str, Any]] = None
+    best_score = 0.0
+    for candidate in QUERY_COMPATIBILITY_INDEX.values():
+        candidate_hash = str(candidate.get("hash") or "")
+        if not candidate_hash or candidate_hash == embedding_hash:
+            continue
+
+        score = _context_compatibility_score(text, str(candidate.get("text") or ""))
+        if score > best_score:
+            best_score = score
+            best_match = {
+                "score": score,
+                "hash": candidate_hash,
+                "text": candidate.get("text"),
+                "embedding": candidate.get("embedding"),
+            }
+
+    if best_match and best_score >= QUERY_COMPATIBILITY_THRESHOLD:
+        return best_match
+    return None
 
 async def _ensure_embedding_table() -> None:
     global EMBEDDING_TABLE_READY
@@ -466,14 +610,47 @@ async def _get_embedding_cached(text: str) -> List[float]:
         return []
     if key in EMBEDDING_CACHE:
         return EMBEDDING_CACHE[key]
+
+    normalized_key = _normalize_embedding_text(key)
+    compatible_local = QUERY_COMPATIBILITY_INDEX.get(normalized_key)
+    if compatible_local and compatible_local.get("embedding"):
+        embedding = compatible_local["embedding"]
+        EMBEDDING_CACHE[key] = embedding
+        return embedding
+
     key_hash = _hash_text(key)
     cached = await _fetch_cached_embeddings("query", [key_hash])
     if key_hash in cached:
-        EMBEDDING_CACHE[key] = cached[key_hash]
-        return cached[key_hash]
+        embedding = cached[key_hash]
+        EMBEDDING_CACHE[key] = embedding
+        _remember_query_embedding(key, key_hash, embedding)
+        return embedding
+
+    compatible = await _find_compatible_query_embedding(key, key_hash)
+    if compatible and compatible.get("embedding"):
+        reused_embedding = compatible["embedding"]
+        EMBEDDING_CACHE[key] = reused_embedding
+        _remember_query_embedding(key, key_hash, reused_embedding)
+        await _store_embedding_records(
+            [
+                {
+                    "embedding_type": "query",
+                    "embedding_hash": key_hash,
+                    "product_id": None,
+                    "text_content": key[:1000],
+                    "model": EMBEDDING_MODEL,
+                    "vector": reused_embedding,
+                }
+            ]
+        )
+        _safe_print(
+            f"♻️ Reuso de embedding por compatibilidade ({compatible['score']:.3f}) | origem: '{str(compatible['text'])[:80]}'"
+        )
+        return reused_embedding
 
     embeddings = await _get_embeddings([key])
     EMBEDDING_CACHE[key] = embeddings[0]
+    _remember_query_embedding(key, key_hash, embeddings[0])
     await _store_embedding_records(
         [
             {

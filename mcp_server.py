@@ -203,8 +203,16 @@ async def _fetch_cached_embeddings(
     results: Dict[str, List[float]] = {}
     for row in rows:
         vector = row["vector"]
-        if isinstance(vector, list):
-            results[str(row["embedding_hash"])] = [float(v) for v in vector]
+        # Handle cases where vector might be a JSON string or already parsed list
+        try:
+            if isinstance(vector, str):
+                vector = json.loads(vector)
+            
+            if isinstance(vector, list):
+                results[str(row["embedding_hash"])] = [float(v) for v in vector]
+        except Exception as e:
+            _safe_print(f"⚠️ Error parsing cached embedding for {row['embedding_hash']}: {e}")
+            
     return results
 
 async def _store_embedding_records(records: List[Dict[str, Any]]) -> None:
@@ -385,34 +393,43 @@ async def _get_embedding_cached(text: str) -> List[float]:
 async def _ensure_product_embeddings(products: List[Dict[str, Any]]) -> None:
     to_embed: List[Dict[str, Any]] = []
     hashes: List[str] = []
-    product_hash_map: Dict[str, Dict[str, Any]] = {}
+    # Map hash to list of [id, text]
+    hash_to_products: Dict[str, List[Dict[str, Any]]] = {}
 
     for product in products:
         product_id = str(product.get("id"))
         text = _build_product_text(product)
         text_hash = _hash_text(text)
-        product_hash_map[text_hash] = {
+        
+        if text_hash not in hash_to_products:
+            hash_to_products[text_hash] = []
+        
+        product_info = {
             "id": product_id,
             "text": text,
             "hash": text_hash,
         }
+        hash_to_products[text_hash].append(product_info)
         hashes.append(text_hash)
 
         cached = PRODUCT_EMBEDDINGS.get(product_id)
         if cached and cached.get("hash") == text_hash:
             continue
 
-        to_embed.append({"id": product_id, "text": text, "hash": text_hash})
+        # Check if we already have this text in to_embed batch to avoid duplicate calls
+        if not any(item["hash"] == text_hash for item in to_embed):
+            to_embed.append(product_info)
 
-    cached_db = await _fetch_cached_embeddings("product", hashes)
+    cached_db = await _fetch_cached_embeddings("product", list(set(hashes)))
     for text_hash, embedding in cached_db.items():
-        product_info = product_hash_map.get(text_hash)
-        if product_info:
-            PRODUCT_EMBEDDINGS[product_info["id"]] = {
+        products_matching = hash_to_products.get(text_hash, [])
+        for p_match in products_matching:
+            PRODUCT_EMBEDDINGS[p_match["id"]] = {
                 "embedding": embedding,
                 "hash": text_hash,
             }
 
+    # Filter to_embed to only items not found in DB
     to_embed = [
         item
         for item in to_embed
@@ -429,20 +446,23 @@ async def _ensure_product_embeddings(products: List[Dict[str, Any]]) -> None:
         embeddings = await _get_embeddings(texts)
         records = []
         for item, embedding in zip(batch, embeddings):
-            PRODUCT_EMBEDDINGS[item["id"]] = {
-                "embedding": embedding,
-                "hash": item["hash"],
-            }
-            records.append(
-                {
-                    "embedding_type": "product",
-                    "embedding_hash": item["hash"],
-                    "product_id": item["id"],
-                    "text_content": item["text"][:1000],
-                    "model": EMBEDDING_MODEL,
-                    "vector": embedding,
+            # Update all products that have this same text
+            products_matching = hash_to_products.get(item["hash"], [])
+            for p_match in products_matching:
+                PRODUCT_EMBEDDINGS[p_match["id"]] = {
+                    "embedding": embedding,
+                    "hash": item["hash"],
                 }
-            )
+                records.append(
+                    {
+                        "embedding_type": "product",
+                        "embedding_hash": item["hash"],
+                        "product_id": p_match["id"],
+                        "text_content": item["text"][:1000],
+                        "model": EMBEDDING_MODEL,
+                        "vector": embedding,
+                    }
+                )
         await _prune_product_embeddings(records)
         await _store_embedding_records(records)
 

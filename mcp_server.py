@@ -303,6 +303,104 @@ def _build_product_text(product: Dict[str, Any]) -> str:
     ]
     return ". ".join([p for p in parts if p]).strip()
 
+def _categorize_product_type(name: str, description: str) -> str:
+    """
+    Categoriza o tipo de produto baseado no nome e descrição.
+    
+    Retorna:
+        "QUADRO_FOTO": Quadros, Polaroides, Fotos, Instax
+        "FLOR": Buquês, Rosas, Flores
+        "PELUCIA": Pelúcias, Ursos
+        "QUEBRA_CABECA": Quebra-cabeças
+        "CANECA": Canecas
+        "BAR_DRINKS": Coquetéis, Drinks, Bebidas
+        "CESTA": Cestas (padrão para tudo o mais)
+    """
+    text = f"{name} {description}".lower()
+    
+    if any(kw in text for kw in ["quadro", "polaroide", "polaróide", "foto", "instax", "fotografia"]):
+        return "QUADRO_FOTO"
+    elif any(kw in text for kw in ["buquê", "buque", "bouquet", "rosa", "flores", "flor", "rosas"]):
+        return "FLOR"
+    elif any(kw in text for kw in ["pelúcia", "pelucia", "urso", "ursinho", "pelúcia"]):
+        return "PELUCIA"
+    elif any(kw in text for kw in ["quebra-cabeça", "quebracabeca", "quebra cabeca", "puzzle"]):
+        return "QUEBRA_CABECA"
+    elif any(kw in text for kw in ["caneca"]):
+        return "CANECA"
+    elif any(kw in text for kw in ["bar", "coquetel", "drink", "bebida", "cerveja", "vinho"]):
+        return "BAR_DRINKS"
+    else:
+        return "CESTA"
+
+def _apply_contextual_ranking(
+    scored_products: List[Dict[str, Any]],
+    has_context: bool
+) -> List[Dict[str, Any]]:
+    """
+    Aplica ranking contextual aos produtos.
+    
+    Se tem contexto (cliente especificou ocasião):
+        - Ordena por similaridade semântica decrescente
+    Se NÃO tem contexto (busca genérica):
+        - Prioridade 1: Quadros/Fotos de preço alto (DESC)
+        - Prioridade 2: Flores de preço alto (DESC)
+        - Prioridade 3: Pelúcias de preço alto (DESC)
+        - Prioridade 4: Outras cestas por preço (DESC)
+        - Prioridade 5: Quebra-cabeças
+        - Prioridade 6: Canecas
+        - Prioridade 7: Bar/Drinks
+    """
+    if has_context:
+        # Com contexto: ordena por similaridade + preço (já é feito no código original)
+        sorted_products = sorted(
+            scored_products,
+            key=lambda p: (p["similarity"], float(p.get("price") or 0.0)),
+            reverse=True
+        )
+        for product in sorted_products:
+            product["ranking_reason"] = "CONTEXTO_SEMÂNTICO"
+        return sorted_products
+    
+    # Sem contexto: aplica prioridades por tipo + preço DESC
+    type_priority = {
+        "QUADRO_FOTO": 1,
+        "FLOR": 2,
+        "PELUCIA": 3,
+        "CESTA": 4,
+        "QUEBRA_CABECA": 5,
+        "CANECA": 6,
+        "BAR_DRINKS": 7,
+    }
+    
+    # Categoriza cada produto
+    categorized = []
+    for product in scored_products:
+        product_type = _categorize_product_type(
+            product.get("name", "").lower(),
+            product.get("description", "").lower()
+        )
+        categorized.append({
+            **product,
+            "product_type": product_type,
+            "type_priority": type_priority.get(product_type, 999),
+        })
+    
+    # Ordena por: tipo_prioridade (ASC) → preço (DESC) → similaridade (DESC)
+    sorted_products = sorted(
+        categorized,
+        key=lambda p: (
+            p["type_priority"],
+            -float(p.get("price") or 0.0),
+            -p["similarity"],
+        )
+    )
+    
+    for product in sorted_products:
+        product["ranking_reason"] = f"TIPO_GENÉRICO:{product['product_type']}"
+    
+    return sorted_products
+
 def _parse_price_value(raw_value: str) -> Optional[float]:
     if not raw_value:
         return None
@@ -1006,27 +1104,30 @@ async def consultarCatalogo(
                                 termo_lower in description
                             )
 
-                            boost = 0.0
-                            if any(kw in name or kw in description for kw in ["quadro", "polaroide", "foto", "instax", "polaróide"]):
-                                boost += 0.04
-                            elif any(kw in name or kw in description for kw in ["caneca"]):
-                                boost -= 0.02
-                            
-                            adjusted_similarity = similarity + boost
-                            
                             scored.append(
                                 {
                                     **product,
-                                    "similarity": adjusted_similarity,
-                                    "original_similarity": similarity,
+                                    "similarity": similarity,
                                     "lexical_match": lexical_match,
                                 }
                             )
 
-                        scored.sort(
-                            key=lambda p: (p["similarity"], float(p.get("price") or 0.0)),
-                            reverse=True,
-                        )
+                        # Determina se há contexto significativo
+                        has_context = bool(contexto_limpo and len(contexto_limpo) > 5)
+                        
+                        # Aplica ranking contextual (com ou sem ocasião específica)
+                        scored = _apply_contextual_ranking(scored, has_context)
+                        
+                        if has_context:
+                            _safe_print(f"🎯 [CONTEXTO DETECTADO] Comprimento: {len(contexto_limpo)} chars")
+                            _safe_print(f"   Contexto: '{contexto_limpo[:100]}...'")
+                            _safe_print(f"   Estratégia: RANKING SEMÂNTICO (similaridade + preço)")
+                        else:
+                            if contexto_limpo:
+                                _safe_print(f"⚠️ [CONTEXTO MUITO CURTO] Comprimento: {len(contexto_limpo)} chars (mínimo: 5)")
+                            else:
+                                _safe_print(f"🔍 [BUSCA GENÉRICA] Nenhum contexto ou contexto vazio")
+                            _safe_print(f"   Estratégia: PRIORIZAÇÃO POR TIPO (QUADRO > FLOR > PELUCIA > CESTA > QUEBRA > CANECA > BAR)")
 
                         temperature_scores = _softmax(
                             [p["similarity"] for p in scored], temperature
@@ -1058,6 +1159,8 @@ async def consultarCatalogo(
                             "termo": termo,
                             "termo_processado": termo_normalizado,
                             "contexto": contexto_limpo,
+                            "contexto_detectado": has_context,
+                            "estrategia_ranking": "SEMÂNTICO" if has_context else "TIPO_COM_PREÇO",
                             "is_caneca_search": is_caneca_search,
                             "caneca_guidance": caneca_guidance,
                             "exatos": [
@@ -1073,6 +1176,8 @@ async def consultarCatalogo(
                                     if p.get("production_time") is not None
                                     else 1,
                                     "tipo_resultado": "EXATO",
+                                    "tipo_produto": p.get("product_type", "CESTA"),
+                                    "motivo_ranking": p.get("ranking_reason", "DESCONHECIDO"),
                                     "relevance_score": int(p["similarity"] * 1000),
                                     "temperature_score": round(
                                         float(p["temperature_score"]), 6
@@ -1093,6 +1198,8 @@ async def consultarCatalogo(
                                     if p.get("production_time") is not None
                                     else 1,
                                     "tipo_resultado": "FALLBACK",
+                                    "tipo_produto": p.get("product_type", "CESTA"),
+                                    "motivo_ranking": p.get("ranking_reason", "DESCONHECIDO"),
                                     "relevance_score": int(p["similarity"] * 1000),
                                     "temperature_score": round(
                                         float(p["temperature_score"]), 6
@@ -1108,8 +1215,12 @@ async def consultarCatalogo(
                                 if p in exact_matches
                                 else "FALLBACK"
                             )
+                            product_type = p.get("product_type", "CESTA")
+                            ranking_reason = p.get("ranking_reason", "DESCONHECIDO")
+                            price = float(p['price'])
+                            sim_score = p['similarity']
                             _safe_print(
-                                f"  ✅ [{tipo}] Ranking {p['ranking']}: {p['name']} - R$ {float(p['price']):.2f} (sim={p['similarity']:.3f})"
+                                f"  ✅ [{tipo}] #{p['ranking']:2d} | {product_type:15} | {p['name']:<35} | R$ {price:7.2f} | SIM={sim_score:.3f} | {ranking_reason}"
                             )
 
                         return json.dumps(structured, ensure_ascii=False)

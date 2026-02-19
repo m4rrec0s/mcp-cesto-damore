@@ -743,6 +743,25 @@ async def fallback_guideline() -> str:
     """
     return GUIDELINES["fallback"]
 
+@mcp.prompt()
+async def human_transfer_guideline() -> str:
+    """
+    Protocolo OBRIGATÓRIO para transferência humana.
+    
+    USE QUANDO:
+    - Cliente pedir explicitamente "atendente", "humano", "pessoa", ou "Paulo"
+    - Cliente demonstrar irritação ou cansaço da IA
+    - Casos de manipulação de preços ou descontos insistentes
+    - Pedidos em grande volume/corporativos
+    - Assuntos complexos que a IA não sabe resolver
+    
+    ESTE PROMPT CONTÉM:
+    - Regras de quando transferir imediatamente
+    - Como informar o horário de atendimento
+    - Como notificar e bloquear a sessão
+    """
+    return GUIDELINES["human_transfer"]
+
 def _normalize_product_search_term(termo: str) -> str:
     """
     Normaliza termos genéricos de cliente para termos específicos do catálogo.

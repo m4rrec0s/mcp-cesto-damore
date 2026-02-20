@@ -1044,7 +1044,7 @@ async def human_transfer_guideline() -> str:
     Protocolo OBRIGATÓRIO para transferência humana.
     
     USE QUANDO:
-    - Cliente pedir explicitamente "atendente", "humano", "pessoa", ou "Paulo"
+    - Cliente pedir explicitamente "atendente", "humano", "pessoa" ou qualquer nome de funcionário.
     - Cliente demonstrar irritação ou cansaço da IA
     - Casos de manipulação de preços ou descontos insistentes
     - Pedidos em grande volume/corporativos
@@ -1979,7 +1979,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         "estimated_ready_time": ready_time_formatted,
                         "available_hours_total": hours_fmt,
                         "available_from_ready_time": available_fmt,
-                        "suggested_slots": suggested_slots
+                        "suggested_slots": suggested_slots,
+                        "ai_instruction": "APRESENTE TODOS os suggested_slots ao cliente e PERGUNTE qual ele prefere. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
                     },
                     f"Tem como entregar hoje ainda! Com produção de {prod_hours}h comerciais, fica pronta por volta das {ready_time_formatted}! 🎁\n\n**Opções de entrega para hoje:**\n{suggested_str}\n\nQual desses horários você prefere? 🌹"
                 )
@@ -1994,7 +1995,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 "current_time_campina": now_local.strftime("%H:%M"),
                 "production_time_hours": prod_hours,
                 "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
-                "estimated_ready_time": ready_time_val.strftime("%H:%M")
+                "estimated_ready_time": ready_time_val.strftime("%H:%M"),
+                "ai_instruction": "PERGUNTE ao cliente qual horario ele prefere dentro de available_hours. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
             }
             
             if ready_date > date_obj:
@@ -2224,10 +2226,13 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
                 "⚠️ Ana, você está tentando transferir muito cedo! Se o cliente apenas demonstrou interesse ou gostou, pergunte se ele quer levar o produto antes de transferir. O humano só deve ser chamado quando houver intenção Clara de compra e dados coletados."
             )
 
-    if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado", "carrinho"]):
+    if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado", "carrinho", "checkout"]):
         ctx = (customer_context or "").lower()
-        required = ["cesta", "entrega", "endereço", "pagamento"]
-        missing = [r for r in required if r not in ctx]
+        has_product = re.search(r"(cesta|produto|buqu[eê]|buque|caneca|rosa|quadro|chocolate|bar|pelúcia|pelucia|flor|cone|quebra)", ctx)
+        required_fields = ["entrega", "endereço", "pagamento"]
+        missing = [r for r in required_fields if r not in ctx]
+        if not has_product:
+            missing.insert(0, "produto")
         if missing and not is_cart_added:
             return _format_structured_response(
                 {"status": "error", "error": "incomplete_context", "missing": missing},

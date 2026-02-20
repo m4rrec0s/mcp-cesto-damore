@@ -479,31 +479,41 @@ def _categorize_product_type(name: str, description: str) -> str:
 
 def _apply_contextual_ranking(
     scored_products: List[Dict[str, Any]],
-    has_context: bool
+    has_context: bool,
+    search_term: str = ""
 ) -> List[Dict[str, Any]]:
     """
     Aplica ranking contextual aos produtos.
     
     Se tem contexto (cliente especificou ocasião):
         - Ordena por similaridade semântica decrescente
+        - Aplica penalidade a canecas (salvo se busca explícita por "caneca")
     Se NÃO tem contexto (busca genérica):
-        - Prioridade 1: Quadros/Fotos de preço alto (DESC)
-        - Prioridade 2: Flores de preço alto (DESC)
-        - Prioridade 3: Pelúcias de preço alto (DESC)
-        - Prioridade 4: Outras cestas por preço (DESC)
-        - Prioridade 5: Quebra-cabeças
-        - Prioridade 6: Canecas
-        - Prioridade 7: Bar/Drinks
+        - Prioridade por tipo: QUADRO > FLOR > PELUCIA > CESTA > QUEBRA > CANECA > BAR
     """
+    search_lower = search_term.lower().strip()
+    is_caneca_search = "caneca" in search_lower
+
+    for product in scored_products:
+        product["product_type"] = _categorize_product_type(
+            product.get("name", ""),
+            product.get("description", "")
+        )
+
     if has_context:
-        # Com contexto: ordena por similaridade + preço (já é feito no código original)
+        CANECA_PENALTY = 0.15
+        for product in scored_products:
+            if product["product_type"] == "CANECA" and not is_caneca_search:
+                product["similarity"] = max(0.0, product["similarity"] - CANECA_PENALTY)
+                product["ranking_reason"] = "CONTEXTO_SEMÂNTICO (penalidade caneca)"
+            else:
+                product["ranking_reason"] = "CONTEXTO_SEMÂNTICO"
+
         sorted_products = sorted(
             scored_products,
             key=lambda p: (p["similarity"], float(p.get("price") or 0.0)),
             reverse=True
         )
-        for product in sorted_products:
-            product["ranking_reason"] = "CONTEXTO_SEMÂNTICO"
         return sorted_products
     
     # Sem contexto: aplica prioridades por tipo + preço DESC
@@ -517,22 +527,11 @@ def _apply_contextual_ranking(
         "BAR_DRINKS": 7,
     }
     
-    # Categoriza cada produto
-    categorized = []
     for product in scored_products:
-        product_type = _categorize_product_type(
-            product.get("name", "").lower(),
-            product.get("description", "").lower()
-        )
-        categorized.append({
-            **product,
-            "product_type": product_type,
-            "type_priority": type_priority.get(product_type, 999),
-        })
+        product["type_priority"] = type_priority.get(product["product_type"], 999)
     
-    # Ordena por: tipo_prioridade (ASC) → preço (DESC) → similaridade (DESC)
     sorted_products = sorted(
-        categorized,
+        scored_products,
         key=lambda p: (
             p["type_priority"],
             -float(p.get("price") or 0.0),
@@ -1293,7 +1292,7 @@ async def consultarCatalogo(
                         has_context = bool(contexto_limpo and len(contexto_limpo) > 5)
                         
                         # Aplica ranking contextual (com ou sem ocasião específica)
-                        scored = _apply_contextual_ranking(scored, has_context)
+                        scored = _apply_contextual_ranking(scored, has_context, termo_normalizado)
                         
                         if has_context:
                             _safe_print(f"🎯 [CONTEXTO DETECTADO] Comprimento: {len(contexto_limpo)} chars")
@@ -2200,53 +2199,79 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     return "Preço validado."
 
 @mcp.tool()
-async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", should_block_flow: bool = True, session_id: Optional[str] = None) -> str:
+async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", session_id: Optional[str] = None) -> str:
     """
-    Transfere para humano. USO OBRIGATÓRIO:
-    1. FIM DO PEDIDO (Todos dados coletados).
-    2. Problema Técnico.
-    3. Evento de carrinho (cliente adicionou produto ao carrinho).
-    
-    reason: motivo (ex: "end_of_checkout" ou "cart_added").
-    customer_context: Resumo (Cesta, Data, Endereço, Pagamento) ou contexto mínimo para carrinho.
-    should_block_flow: true (stop bot).
-    
-    NÃO use para "interesse". Apenas COMPRA confirmada.
+    Transfere IMEDIATAMENTE para atendimento humano. Use quando:
+    1. Cliente pede para falar com humano/atendente/pessoa.
+    2. Evento de carrinho (cart_added).
+    3. Problema técnico ou caso complexo.
+    4. Tentativa de manipulação de preço.
+    5. Pedido corporativo.
+
+    NÃO use para finalizar compra (use finalize_checkout).
+    NÃO valida dados de checkout — transfere direto.
+
+    reason: motivo (ex: "cliente_quer_atendente", "cart_added", "pedido_corporativo").
+    customer_context: Contexto breve da conversa.
     """
-    reason_lower = (reason or "").lower()
-    is_cart_added = any(
-        k in reason_lower
-        for k in ["cart_added", "cart_add", "produto ao carrinho", "adicionou no carrinho"]
-    )
-
-    # Prevenção de abandono precoce (Interesse != Compra)
-    if any(k in reason_lower for k in ["interesse", "gostou", "interessou", "quer saber", "curioso"]):
-         return _format_structured_response(
-                {"status": "error", "error": "premature_handover"},
-                "⚠️ Ana, você está tentando transferir muito cedo! Se o cliente apenas demonstrou interesse ou gostou, pergunte se ele quer levar o produto antes de transferir. O humano só deve ser chamado quando houver intenção Clara de compra e dados coletados."
-            )
-
-    if any(k in reason_lower for k in ["finaliza", "finalização", "pedido", "finalizar", "finalizado", "carrinho", "checkout"]):
-        ctx = (customer_context or "").lower()
-        has_product = re.search(r"(cesta|produto|buqu[eê]|buque|caneca|rosa|quadro|chocolate|bar|pelúcia|pelucia|flor|cone|quebra)", ctx)
-        required_fields = ["entrega", "endereço", "pagamento"]
-        missing = [r for r in required_fields if r not in ctx]
-        if not has_product:
-            missing.insert(0, "produto")
-        if missing and not is_cart_added:
-            return _format_structured_response(
-                {"status": "error", "error": "incomplete_context", "missing": missing},
-                f"⚠️ Contexto incompleto para finalização. Faltando dados essenciais: {', '.join(missing)}. \n\nInstrução para Ana: NÃO CHAME esta ferramenta novamente até que o cliente forneça esses dados. Informe ao cliente o que falta e peça gentilmente."
-            )
-
     support_message = _format_support_message(reason, customer_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
 
-    if should_block_flow and session_id:
+    if session_id:
         await _internal_block_session(session_id)
-        return "Notificação enviada e atendimento encerrado com sucesso. ✅"
 
-    return "Notificação enviada com sucesso para o time humano. ✅"
+    return "Transferência realizada com sucesso. Atendente humano notificado. ✅"
+
+
+@mcp.tool()
+async def finalize_checkout(customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", session_id: Optional[str] = None) -> str:
+    """
+    Finaliza pedido APÓS coleta completa dos dados. USO OBRIGATÓRIO no fim do checkout.
+
+    customer_context DEVE conter TODOS:
+    - Produto (nome + preço R$)
+    - Data e horário de entrega
+    - Endereço completo (ou "retirada")
+    - Forma de pagamento (PIX ou Cartão)
+
+    Se faltar algum dado, retorna erro com instruções de coleta.
+    Após sucesso, bloqueia a sessão automaticamente.
+    """
+    ctx = (customer_context or "").lower()
+    is_retirada = "retirada" in ctx or "retirar" in ctx
+
+    has_product = bool(re.search(r"(cesta|produto|buqu[eê]|buque|caneca|rosa|quadro|chocolate|bar|pelúcia|pelucia|flor|cone|quebra)", ctx))
+    has_delivery = bool(re.search(r"(entrega|data|hoje|amanh[aã]|\d{1,2}\/\d{1,2}|\d{4}-\d{2}-\d{2})", ctx))
+    has_address = is_retirada or bool(re.search(r"(rua|avenida|av\.|r\.|endereço|endereco|bairro)", ctx))
+    has_payment = bool(re.search(r"(pix|cart[aã]o|cartao|crédito|credito|débito|debito)", ctx))
+
+    missing = []
+    if not has_product:
+        missing.append("produto (nome e preço)")
+    if not has_delivery:
+        missing.append("data/horário de entrega")
+    if not has_address:
+        missing.append("endereço completo")
+    if not has_payment:
+        missing.append("forma de pagamento")
+
+    if missing:
+        return _format_structured_response(
+            {"status": "error", "error": "incomplete_checkout", "missing": missing},
+            f"⚠️ Checkout incompleto. Faltam: {', '.join(missing)}.\n\nColeta obrigatória:\n1. Produto (nome + preço)\n2. Data e Horário\n3. Endereço completo\n4. Forma de pagamento (PIX ou Cartão)\n5. Resumo final + confirmação do cliente"
+        )
+
+    structured_context = f"=== RESUMO DO PEDIDO ===\n{customer_context}\n====================="
+    support_message = _format_support_message("end_of_checkout", structured_context, customer_name, customer_phone)
+    await _send_whatsapp_notification(support_message, customer_name, customer_phone)
+
+    if session_id:
+        await _internal_block_session(session_id)
+
+    return _format_structured_response(
+        {"status": "success", "action": "checkout_finalized"},
+        "Pedido finalizado e equipe notificada com sucesso! ✅"
+    )
 
 @mcp.tool()
 async def math_calculator(expression: str) -> str:

@@ -2261,7 +2261,12 @@ async def finalize_checkout(customer_context: str, customer_name: str = "Cliente
             f"⚠️ Checkout incompleto. Faltam: {', '.join(missing)}.\n\nColeta obrigatória:\n1. Produto (nome + preço)\n2. Data e Horário\n3. Endereço completo\n4. Forma de pagamento (PIX ou Cartão)\n5. Resumo final + confirmação do cliente"
         )
 
-    structured_context = f"=== RESUMO DO PEDIDO ===\n{customer_context}\n====================="
+    # Monta contexto estruturado com informações completas
+    structured_context = f"""=== RESUMO DO PEDIDO ===
+{customer_context}
+Horário de Atendimento: Seg-Sex 07:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
+====================="""
+    
     support_message = _format_support_message("end_of_checkout", structured_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
 

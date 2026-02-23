@@ -853,21 +853,24 @@ def _format_support_message(
     nome = customer_name or "Desconhecido"
     numero = customer_phone or "Sem contato"
     
-    header = f"*AJUDA [{emoji}] - Cliente {nome} - {numero}*"
+    header = f"🚨 *AJUDA [{emoji}] - CLIENTE: {nome.upper()}*"
+    contato = f"📱 Contato: {numero}"
     
     reason_lower = reason.lower()
-    if "finaliza" in reason_lower or "pedido" in reason_lower:
-        descricao = "✅ Pedido pronto para finalização humana."
+    if any(kw in reason_lower for kw in ["finaliza", "pedido", "checkout", "end_of"]):
+        descricao = "✅ *PEDIDO PRONTO PARA CONEXÃO HUMANA*"
     elif "frete" in reason_lower:
-        descricao = "🚚 Dúvida ou confirmação de frete."
+        descricao = "🚚 *DÚVIDA / CONFIRMAÇÃO DE FRETE*"
+    elif "cart_added" in reason_lower:
+        descricao = "🛒 *CLIENTE ADICIONOU AO CARRINHO*"
     else:
-        descricao = f"Acionamento: {reason}"
+        descricao = f"📌 Motivo: {reason.replace('_', ' ').capitalize()}"
 
     if customer_context and customer_context.strip().lower() != "none":
         contexto = customer_context.strip()
-        message = f"{header}\n{descricao}\n\n{contexto}"
+        message = f"{header}\n{contato}\n{descricao}\n\n{contexto}"
     else:
-        message = f"{header}\n{descricao}\n\n⚠️ Contexto não fornecido pela IA."
+        message = f"{header}\n{contato}\n{descricao}\n\n⚠️ Contexto não fornecido pela IA."
         
     return message
 

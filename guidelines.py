@@ -136,7 +136,7 @@ Exemplos:
 - Precisar esclarecer que o pagamento e o frete são validados por pessoas.
 
 ### Horário de Atendimento Comercial:
-- **Segunda a Sexta**: 07:30 às 12:00 | 14:00 às 17:00
+- **Segunda a Sexta**: 08:30 às 12:00 | 14:00 às 17:00
 - **Sábado**: 08:00 às 11:00
 - **Domingo**: Fechado
 
@@ -159,7 +159,7 @@ Vinho, fitness, frutas, marcas específicas, salgados, sob encomenda.
     "delivery_rules": """## Regras de entrega e Horários
 
 ### Horários de Funcionamento (Atendimento e Entrega)
-- **Segunda a Sexta**: 07:30 às 12:00 | 14:00 às 17:00
+- **Segunda a Sexta**: 08:30 às 12:00 | 14:00 às 17:00
 - **Sábado**: 08:00 às 11:00
 - **Domingo**: FECHADO (Não aceitamos pedidos)
 
@@ -297,7 +297,7 @@ Após confirmar o pedido, informe:
 "Como sou uma **Assistente Virtual**, já passei todos os detalhes para o nosso time! ❤️ Eles vão conferir tudo, validar o frete e te enviar os dados de pagamento no nosso horário de atendimento:
 
 ⏰ **Horário de Atendimento:**
-• **Seg-Sex:** 07:30-12:00 | 14:00-17:00
+• **Seg-Sex:** 08:30-12:00 | 14:00-17:00
 • **Sábado:** 08:00-11:00
 
 Logo te respondem! Obrigadaaa 🥰"
@@ -430,7 +430,7 @@ Cesta com chocolates, pelúcia e flores vermelhas. Perfeita para demonstrar amor
 ### 3.1. CÁLCULO DE TEMPO DE PRODUÇÃO (HORÁRIO COMERCIAL FRACIONADO)
 
 ⚠️ **ATENÇÃO:** O expediente é FRACIONADO:
-- Manhã: 07:30 - 12:00 (4h30min)
+- Manhã: 08:30 - 12:00 (4h30min)
 - Tarde: 14:00 - 17:00 (3h)
 
 **VOCÊ DEVE CALCULAR considerando APENAS horas comerciais!**
@@ -499,7 +499,7 @@ Linguagem ofensiva ou comportamento suspeito:
 - **Dúvidas técnicas/complexas**: "Essa informação é bem específica e eu não queria te passar nada errado! 😅 Posso te passar para o nosso especialista?"
 
 ### 3. Como Transferir (Sequência Obrigatória):
-1. **Informe o Horário**: "Nosso time atende de Segunda a Sexta (07:30-12:00 | 14:00-17:00) e Sábado (08:00-11:00). ⏰"
+1. **Informe o Horário**: "Nosso time atende de Segunda a Sexta (08:30-12:00 | 14:00-17:00) e Sábado (08:00-11:00). ⏰"
 2. **Confirme a Transferência**: "Vou te passar para o nosso time agora mesmo! Um momento. 💕"
 3. **Execute**: `notify_human_support` com o motivo real (ex: "cliente_quer_atendente", "pedido_corporativo", "solicitacao_desconto"). A sessão será bloqueada automaticamente.
 
@@ -566,7 +566,7 @@ Chame `notify_human_support` com:
 #### 1️⃣ SEMPRE informe que você é uma Assistente Virtual e o horário:
 "Como sou uma **Assistente Virtual**, vou te passar para o nosso time agora mesmo! ❤️ Eles atendem nos seguintes horários:
 
-• **Segunda a Sexta**: 07:30-12:00 e 14:00-17:00
+• **Segunda a Sexta**: 08:30-12:00 e 14:00-17:00
 • **Sábado**: 08:00-11:00
 • **Domingo**: Fechado
 

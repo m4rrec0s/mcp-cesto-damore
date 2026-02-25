@@ -2223,7 +2223,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     if session_id:
         await _internal_block_session(session_id)
 
-    return "Transferência realizada com sucesso. Atendente humano notificado. ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA avisar o cliente que ele foi transferido e informar OBRIGATORIAMENTE na sua reposta final o horário de atendimento comercial exato:\nSeg-Sex 07:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
+    return "Transferência realizada com sucesso. Atendente humano notificado. ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA avisar o cliente que ele foi transferido e informar OBRIGATORIAMENTE na sua reposta final o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
 
 
 @mcp.tool()
@@ -2267,7 +2267,7 @@ async def finalize_checkout(customer_context: str, customer_name: str = "Cliente
     # Monta contexto estruturado com informações completas
     structured_context = f"""=== RESUMO DO PEDIDO ===
 {customer_context}
-Horário de Atendimento: Seg-Sex 07:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
+Horário de Atendimento: Seg-Sex 08:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
 ====================="""
     
     support_message = _format_support_message("end_of_checkout", structured_context, customer_name, customer_phone)
@@ -2278,7 +2278,7 @@ Horário de Atendimento: Seg-Sex 07:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
 
     return _format_structured_response(
         {"status": "success", "action": "checkout_finalized"},
-        "Pedido finalizado e equipe notificada com sucesso! ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA enviar ao cliente OBRIGATORIAMENTE a mensagem final com o horário de atendimento comercial exato:\nSeg-Sex 07:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
+        "Pedido finalizado e equipe notificada com sucesso! ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA enviar ao cliente OBRIGATORIAMENTE a mensagem final com o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
     )
 
 @mcp.tool()
@@ -2534,7 +2534,7 @@ async def proc_validar_horario_funcionamento() -> str:
     QUANDO USAR: Cliente perguntar "A loja está aberta?", "Que horas vocês fecham?", "Vocês abrem aos domingos?"
     
     HORÁRIOS OPERACIONAIS:
-    - **Segunda a Sexta**: 07:30 às 12:00 e 14:00 às 17:00 (com intervalo 12:00-14:00)
+    - **Segunda a Sexta**: 08:30 às 12:00 e 14:00 às 17:00 (com intervalo 12:00-14:00)
     - **Sábado**: 08:00 às 11:00
     - **Domingo**: ❌ FECHADO
     

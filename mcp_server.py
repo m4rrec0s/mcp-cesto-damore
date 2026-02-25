@@ -2223,7 +2223,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     if session_id:
         await _internal_block_session(session_id)
 
-    return "Transferência realizada com sucesso. Atendente humano notificado. ✅"
+    return "Transferência realizada com sucesso. Atendente humano notificado. ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA avisar o cliente que ele foi transferido e informar OBRIGATORIAMENTE na sua reposta final o horário de atendimento comercial exato:\nSeg-Sex 07:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
 
 
 @mcp.tool()
@@ -2278,7 +2278,7 @@ Horário de Atendimento: Seg-Sex 07:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
 
     return _format_structured_response(
         {"status": "success", "action": "checkout_finalized"},
-        "Pedido finalizado e equipe notificada com sucesso! ✅"
+        "Pedido finalizado e equipe notificada com sucesso! ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA enviar ao cliente OBRIGATORIAMENTE a mensagem final com o horário de atendimento comercial exato:\nSeg-Sex 07:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
     )
 
 @mcp.tool()

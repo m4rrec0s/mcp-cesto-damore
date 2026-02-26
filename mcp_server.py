@@ -1093,6 +1093,12 @@ def _normalize_product_search_term(termo: str) -> str:
         "gift": "cesto",
         "gifts": "cesto",
         "present": "cesto",
+        "lembrancinha": "cesto",
+        "lembrancinhas": "cesto",
+        "prendinha": "cesto",
+        "prendinhas": "cesto",
+        "pequeno": "cesto",
+        "pequenino": "cesto",
         
         "anuncio": "anuncio",
         

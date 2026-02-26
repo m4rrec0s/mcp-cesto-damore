@@ -1134,13 +1134,13 @@ def _normalize_product_search_term(termo: str) -> str:
         "graduação": "cesto",
         "graduacao": "cesto",
         
-        "aniversário": "aniversário d'amore",
-        "aniversario": "aniversário d'amore",
-        "birthday": "aniversário d'amore",
-        "café": "café d'amore",
-        "cafe": "café d'amore",
-        "chocolate": "chocolate d'amore",
-        "chocolates": "chocolate d'amore",
+        "aniversário": "aniversário",
+        "aniversario": "aniversário",
+        "birthday": "aniversário",
+        "café": "café",
+        "cafe": "café",
+        "chocolate": "chocolate",
+        "chocolates": "chocolate",
         "cone": "cone",
         
         "mais opções": "cesto",
@@ -1158,9 +1158,9 @@ def _normalize_product_search_term(termo: str) -> str:
     
     termo_limpo = re.sub(r"[^\w\s]", "", termo_lower).strip()
     specific_terms = [
-        "cesto", "buquê", "buque", "bar", "caneca", "pelúcia", "pelecia", "quadro",
+        "cesto", "cesta", "buquê", "buque", "bar", "caneca", "pelúcia", "pelucia", "quadro",
         "quebra-cabeça", "quebra", "coração", "coracao", "aniversário", "aniversario",
-        "café", "cafe", "chocolate", "cone"
+        "café", "cafe", "chocolate", "cone", "rosa", "flor"
     ]
     
     if any(specific in termo_limpo for specific in specific_terms):
@@ -1267,6 +1267,7 @@ async def consultarCatalogo(
 
                         scored = []
                         termo_lower = termo_normalizado.lower().strip()
+                        original_lower = termo.lower().strip()
                         for product in products:
                             product_id = str(product.get("id"))
                             cached = PRODUCT_EMBEDDINGS.get(product_id, {})
@@ -1280,7 +1281,9 @@ async def consultarCatalogo(
                             description = (product.get("description") or "").lower()
                             lexical_match = (
                                 termo_lower in name or 
-                                termo_lower in description
+                                termo_lower in description or
+                                original_lower in name or
+                                original_lower in description
                             )
 
                             scored.append(
@@ -1406,14 +1409,37 @@ async def consultarCatalogo(
                 except Exception as e:
                     _safe_print(f"⚠️ Falha no ranking semântico, usando busca lexical: {e}")
 
-            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
-            search_terms = [w.strip() for w in termo_normalizado.split() if w.strip().lower() not in common_words]
+            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com", "cliente", "procura", "queria", "quero"}
             
-            search_terms = list(set(search_terms + [termo_normalizado]))
-            search_terms = [t for t in search_terms if t.lower().strip()]
+            # Adiciona variantes (com e sem acento) para aumentar matching lexical
+            def get_variants(t):
+                if not t: return []
+                v = [t]
+                # Remove acentos
+                no_accents = "".join(
+                    c for c in unicodedata.normalize("NFD", t)
+                    if unicodedata.category(c) != "Mn"
+                )
+                if no_accents != t:
+                    v.append(no_accents)
+                return v
+
+            search_terms = []
+            for w in termo_normalizado.split():
+                if w.strip().lower() not in common_words and len(w.strip()) > 2:
+                    search_terms.extend(get_variants(w.strip()))
+            
+            # Adiciona também palavras-chave do contexto se for curto
+            if contexto_limpo and len(contexto_limpo) < 100:
+                for w in contexto_limpo.split():
+                    if w.strip().lower() not in common_words and len(w.strip()) > 3:
+                        search_terms.extend(get_variants(w.strip()))
+
+            search_terms = list(set(search_terms + get_variants(termo_normalizado) + get_variants(termo)))
+            search_terms = [t for t in search_terms if t.strip()]
             
             if len(search_terms) > 1:
-                _safe_print(f"🔑 Breaking multi-word search: '{termo_normalizado}' → Testing keywords: {search_terms}")
+                _safe_print(f"🔑 Multi-term search variants: {search_terms}")
             all_rows = []
             search_terms_tested = []
             

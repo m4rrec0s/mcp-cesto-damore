@@ -493,6 +493,8 @@ def _apply_contextual_ranking(
     """
     search_lower = search_term.lower().strip()
     is_caneca_search = "caneca" in search_lower
+    is_quebra_search = "quebra" in search_lower
+    is_quadro_search = "quadro" in search_lower or "polaroide" in search_lower or "polaroides" in search_lower
 
     for product in scored_products:
         product["product_type"] = _categorize_product_type(
@@ -511,7 +513,7 @@ def _apply_contextual_ranking(
 
         sorted_products = sorted(
             scored_products,
-            key=lambda p: (p["similarity"], float(p.get("price") or 0.0)),
+            key=lambda p: (p["similarity"], -float(p.get("price") or 0.0)),
             reverse=True
         )
         return sorted_products
@@ -534,7 +536,7 @@ def _apply_contextual_ranking(
         scored_products,
         key=lambda p: (
             p["type_priority"],
-            float(p.get("price") or 0.0),
+            -float(p.get("price") or 0.0),
             -p["similarity"],
         )
     )
@@ -1492,13 +1494,27 @@ async def consultarCatalogo(
                     if not any(r['id'] == row['id'] for r in all_rows):
                         all_rows.append(row)
             
-            all_rows = sorted(
-                all_rows,
-                key=lambda r: (not r['is_exact_match'], -r['relevance_score'], -r['price'])
-            )
+            # Converte asyncpg.Record para dicionários mutáveis e adiciona categorização
+            all_rows_dict = [dict(r) for r in all_rows]
+            
+            for r in all_rows_dict:
+                r['product_type'] = _categorize_product_type(r.get('name', ''), r.get('description', ''))
+                r['similarity'] = r.get('relevance_score', 0) / 100.0
+            
+            # Aplica ranking contextual
+            scored_lexical = _apply_contextual_ranking(all_rows_dict, bool(contexto_limpo and len(contexto_limpo) > 5), termo_normalizado)
+            
+            # Re-ordena aplicando prioridade de exatidão (exatos primeiro)
+            exact_lexical = [r for r in scored_lexical if r['is_exact_match']]
+            fallback_lexical = [r for r in scored_lexical if not r['is_exact_match']]
+            rows = exact_lexical + fallback_lexical
+            
+            # Recalcula ranking após reordenação
+            for idx, r in enumerate(rows, 1):
+                r['ranking'] = idx
             
             # Returns up to 10 products for the IA to have context, but she must display only 2 per message.
-            rows = all_rows[:10]
+            rows = rows[:10]
             
             _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{preco_minimo}-{preco_maximo}], exclude={len(exclude_ids)} IDs")
             

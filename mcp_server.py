@@ -516,7 +516,7 @@ def _apply_contextual_ranking(
         )
         return sorted_products
     
-    # Sem contexto: aplica prioridades por tipo + preço DESC
+    # Sem contexto: aplica prioridades por tipo + preço DESC (mais caro primeiro)
     type_priority = {
         "QUADRO_FOTO": 1,
         "FLOR": 2,
@@ -534,7 +534,7 @@ def _apply_contextual_ranking(
         scored_products,
         key=lambda p: (
             p["type_priority"],
-            -float(p.get("price") or 0.0),
+            float(p.get("price") or 0.0),
             -p["similarity"],
         )
     )
@@ -1337,20 +1337,20 @@ async def consultarCatalogo(
                             if p not in exact_matches
                         ]
 
-                        is_caneca_search = "caneca" in termo_lower
-                        caneca_guidance = ""
-                        if is_caneca_search:
-                            caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h (horário comercial)) e as customizáveis com fotos/nomes (18h (horário comercial)). Qual você prefere?"
+                        exact_matches = [
+                            p
+                            for p in scored
+                            if p["similarity"] >= min_similarity or p["lexical_match"]
+                        ]
+                        fallback_matches = [
+                            p
+                            for p in scored
+                            if p not in exact_matches
+                        ]
 
                         structured = {
                             "status": "found" if scored else "not_found",
                             "termo": termo,
-                            "termo_processado": termo_normalizado,
-                            "contexto": contexto_limpo,
-                            "contexto_detectado": has_context,
-                            "estrategia_ranking": "SEMÂNTICO" if has_context else "TIPO_COM_PREÇO",
-                            "is_caneca_search": is_caneca_search,
-                            "caneca_guidance": caneca_guidance,
                             "exatos": [
                                 {
                                     "ranking": p["ranking"],
@@ -1364,12 +1364,6 @@ async def consultarCatalogo(
                                     if p.get("production_time") is not None
                                     else 1,
                                     "tipo_resultado": "EXATO",
-                                    "tipo_produto": p.get("product_type", "CESTA"),
-                                    "motivo_ranking": p.get("ranking_reason", "DESCONHECIDO"),
-                                    "relevance_score": int(p["similarity"] * 1000),
-                                    "temperature_score": round(
-                                        float(p["temperature_score"]), 6
-                                    ),
                                 }
                                 for p in exact_matches
                             ],
@@ -1386,12 +1380,6 @@ async def consultarCatalogo(
                                     if p.get("production_time") is not None
                                     else 1,
                                     "tipo_resultado": "FALLBACK",
-                                    "tipo_produto": p.get("product_type", "CESTA"),
-                                    "motivo_ranking": p.get("ranking_reason", "DESCONHECIDO"),
-                                    "relevance_score": int(p["similarity"] * 1000),
-                                    "temperature_score": round(
-                                        float(p["temperature_score"]), 6
-                                    ),
                                 }
                                 for p in fallback_matches
                             ],
@@ -1430,19 +1418,25 @@ async def consultarCatalogo(
                     v.append(no_accents)
                 return v
 
-            search_terms = []
+            # Começa com termo_normalizado (maior prioridade)
+            search_terms = list(dict.fromkeys(get_variants(termo_normalizado)))
+            
+            # Depois adiciona palavras individuais do termo normalizado
             for w in termo_normalizado.split():
                 if w.strip().lower() not in common_words and len(w.strip()) > 2:
                     search_terms.extend(get_variants(w.strip()))
             
-            # Adiciona também palavras-chave do contexto se for curto
+            # Depois palavras-chave do contexto se for curto
             if contexto_limpo and len(contexto_limpo) < 100:
                 for w in contexto_limpo.split():
                     if w.strip().lower() not in common_words and len(w.strip()) > 3:
                         search_terms.extend(get_variants(w.strip()))
 
-            search_terms = list(set(search_terms + get_variants(termo_normalizado) + get_variants(termo)))
-            search_terms = [t for t in search_terms if t.strip()]
+            # Finalmente, variantes do termo original
+            search_terms.extend(get_variants(termo))
+            
+            # Remove duplicatas mantendo ordem
+            search_terms = list(dict.fromkeys([t for t in search_terms if t.strip()]))
             
             if len(search_terms) > 1:
                 _safe_print(f"🔑 Multi-term search variants: {search_terms}")
@@ -1590,16 +1584,10 @@ async def consultarCatalogo(
             fallback_matches = [r for r in rows if not r['is_exact_match']]
             
             is_caneca_search = 'caneca' in termo_normalizado.lower()
-            caneca_guidance = ""
-            if is_caneca_search:
-                caneca_guidance = "\n🎁 **IMPORTANTE**: Temos canecas de pronta entrega (1h (horário comercial)) e as customizáveis com fotos/nomes (18h (horário comercial)). Qual você prefere?"
             
             structured = {
                 "status": "found" if rows else "not_found",
                 "termo": termo,
-                "termo_processado": termo_normalizado,
-                "is_caneca_search": is_caneca_search,
-                "caneca_guidance": caneca_guidance,
                 "exatos": [
                     {
                         "ranking": r['ranking'],
@@ -1610,7 +1598,6 @@ async def consultarCatalogo(
                         "imagem": r['image_url'] or "https://api.cestodamore.com.br/images/default-product.webp",
                         "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
                         "tipo_resultado": "EXATO",
-                        "relevance_score": int(r['relevance_score'])
                     }
                     for r in exact_matches
                 ],
@@ -1624,7 +1611,6 @@ async def consultarCatalogo(
                         "imagem": r['image_url'] or "https://api.cestodamore.com.br/images/default-product.webp",
                         "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
                         "tipo_resultado": "FALLBACK",
-                        "relevance_score": int(r['relevance_score'])
                     }
                     for r in fallback_matches
                 ]
@@ -2234,7 +2220,7 @@ async def validate_price_manipulation(claimed_price: float, product_name: str) -
     return "Preço validado."
 
 @mcp.tool()
-async def notify_human_support(reason: str, customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", session_id: Optional[str] = None) -> str:
+async def notify_human_support(reason: str, customer_context: str, customer_name: str, customer_phone: str, session_id: Optional[str] = None) -> str:
     """
     Transfere IMEDIATAMENTE para atendimento humano. Use quando:
     1. Cliente pede para falar com humano/atendente/pessoa.

@@ -1203,8 +1203,7 @@ async def consultarCatalogo(
         exclude_ids: IDs já mostrados (evita repetição)
         top_k: Quantidade de resultados (max 10, default 10)
     
-    Returns:
-        JSON: {"status": "found"|"not_found"|"error", "exatos": [], "fallback": []}
+    Retorna: JSON com status, termos, e listas de produtos exatos e fallback.
     """
     try:
         contexto_limpo = (contexto or "").strip()

@@ -1181,52 +1181,54 @@ def _normalize_product_search_term(termo: str) -> str:
 @mcp.tool()
 async def consultarCatalogo(
     termo: str,
+    contexto: str,
     preco_minimo: Optional[float] = None,
     preco_maximo: Optional[float] = None,
-    exclude_product_ids: Optional[List[str]] = None,
-    contexto: Optional[str] = None,
-    use_semantic: Optional[bool] = None,
-    temperature: Optional[float] = None,
-    min_similarity: Optional[float] = None,
-    top_k: Optional[int] = None,
+    exclude_ids: Optional[list] = None,
+    top_k: Optional[int] = 10,
 ) -> str:
     """
-    Busca produtos por termo (ocasião ou tipo), com filtros de preço.
-
-    Retorna JSON: {"exatos": [], "fallback": []}. Priorize SEMPRE produtos "exatos".
-    Mostre exatamente 2 produtos por vez (ranking menor = melhor).
-
-    Campos obrigatórios na apresentação: ID, Nome, Preço, Descrição e Production Time.
-    Se esvaziar busca por preço, ofereça buscar sem limite.
-
+    🔍 Busca produtos no catálogo usando contexto OBRIGATÓRIO.
+    
+    CRÍTICO: contexto é OBRIGATÓRIO - sem ele os resultados são errados!
+    
     Args:
-        termo: palavra-chave de busca (ex: "aniversário", "flores", "caneca")
-        preco_minimo: preco minimo em reais. Use quando cliente diz "a partir de R$ X" (padrao: 0)
-        preco_maximo: preco maximo em reais. Use quando cliente diz "até R$ X" ou "barato" (padrao: 999999)
-        exclude_product_ids: IDs de produtos a excluir (já apresentados ao cliente)
-        contexto: Contexto COMPLETO da necessidade do cliente (ex: "presente de aniversário para namorada que gosta de chocolates e fotos"). NÃO use apenas uma palavra aqui. Use a frase do cliente para melhor RAG.
-        use_semantic: se true, aplica ranking semantico por embeddings (padrao: true)
-        temperature: controla o "rank de temperatura" (padrao: 0.35)
-        min_similarity: limiar para classificar como EXATO (padrao: 0.18)
-        top_k: maximo de produtos retornados (padrao: 10)
-
-    Exemplos:
-        - "Aniversário" -> termo="aniversário"
-        - "Flores baratas" -> termo="flores", preco_maximo=120
-        - "Cestas até 200" -> termo="cesto", preco_maximo=200
-        - "Caneca" -> termo="caneca"
+        termo: Tipo/nome do produto (e.g., "cesto romantico", "buquê")
+        contexto: OBRIGATÓRIO - Contexto COMPLETO com ocasião, motivo, destinatário, orçamento
+                  ✅ "Para aniversário da namorada, gosta de flores, até R$ 200"
+                  ✅ "Presente para mãe no dia das mães, orçamento R$ 150"
+                  ❌ "presente" - MUITO VAGO
+        preco_minimo: Mínimo opcional (inferido do contexto se não fornecido)
+        preco_maximo: Máximo opcional (inferido do contexto se não fornecido)
+        exclude_ids: IDs já mostrados (evita repetição)
+        top_k: Quantidade de resultados (max 10, default 10)
+    
+    Returns:
+        JSON: {"status": "found"|"not_found"|"error", "exatos": [], "fallback": []}
     """
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        try:
-            termo_normalizado = _normalize_product_search_term(termo)
-            if termo_normalizado != termo:
-                _safe_print(f"📝 Termo original: '{termo}' → Normalizado: '{termo_normalizado}'")
-
-            exclude_ids = exclude_product_ids if exclude_product_ids else []
+    try:
+        contexto_limpo = (contexto or "").strip()
+        
+        # ⚠️ Validação crítica
+        if not contexto_limpo or contexto_limpo.lower() == termo.lower():
+            raise ValueError(
+                "❌ CONTEXTO OBRIGATÓRIO E DIFERENTE DO TERMO!\n"
+                "Você DEVE requisitar um contexto COMPLETO.\n"
+                "Exemplos corretos:\n"
+                "  ✅ 'Para aniversário da minha namorada, gosta de flores, até R$ 200'\n"
+                "  ✅ 'Presente para mãe, ocasião dia das mães, orçamento R$ 150'\n"
+                "Exemplos INCORRETOS:\n"
+                "  ❌ Apenas o termo sem contexto\n"
+                "  ❌ Contexto=termo (apenas repetição)"
+            )
+        
+        termo_normalizado = _normalize_product_search_term(termo)
+        
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            # Extrai limites de preço
+            exclude_ids = exclude_ids or []
             exclude_ids = [str(id) for id in exclude_ids]
-
-            contexto_limpo = (contexto or "").strip()
             price_source = f"{termo_normalizado} {contexto_limpo}".strip()
             ctx_min, ctx_max = _extract_price_bounds(price_source)
 
@@ -1243,406 +1245,119 @@ async def consultarCatalogo(
             if preco_minimo > preco_maximo:
                 preco_minimo, preco_maximo = preco_maximo, preco_minimo
 
-            use_semantic_search = (
-                True if use_semantic is None else bool(use_semantic)
-            ) and openai_client is not None
-            temperature = float(temperature) if temperature is not None else 0.35
-            min_similarity = float(min_similarity) if min_similarity is not None else 0.18
             top_k = int(top_k) if top_k else 10
             top_k = max(2, min(10, top_k))
 
-            if use_semantic_search:
-                try:
-                    query = """
-                    SELECT id, name, description, price, image_url, production_time
-                    FROM public."Product"
-                    WHERE price >= $1
-                      AND price <= $2
-                      AND is_active = true
-                      AND NOT (id::TEXT = ANY($3::TEXT[]))
-                    """
-                    rows = await conn.fetch(query, preco_minimo, preco_maximo, exclude_ids)
+            _safe_print(f"🔍 Busca: termo='{termo_normalizado}', preço=[{preco_minimo:.2f}-{preco_maximo:.2f}]")
 
-                    if rows:
-                        products = [dict(r) for r in rows]
-                        await _ensure_product_embeddings(products)
-
-                        query_text = termo_normalizado
-                        if contexto_limpo:
-                            query_text = f"{query_text}. {contexto_limpo}"
-
-                        query_embedding = await _get_embedding_cached(query_text)
-
-                        scored = []
-                        termo_lower = termo_normalizado.lower().strip()
-                        original_lower = termo.lower().strip()
-                        for product in products:
-                            product_id = str(product.get("id"))
-                            cached = PRODUCT_EMBEDDINGS.get(product_id, {})
-                            embedding = cached.get("embedding")
-                            similarity = (
-                                _cosine_similarity(query_embedding, embedding)
-                                if embedding
-                                else 0.0
-                            )
-                            name = (product.get("name") or "").lower()
-                            description = (product.get("description") or "").lower()
-                            lexical_match = (
-                                termo_lower in name or 
-                                termo_lower in description or
-                                original_lower in name or
-                                original_lower in description
-                            )
-
-                            scored.append(
-                                {
-                                    **product,
-                                    "similarity": similarity,
-                                    "lexical_match": lexical_match,
-                                }
-                            )
-
-                        # Determina se há contexto significativo
-                        has_context = bool(contexto_limpo and len(contexto_limpo) > 5)
-                        
-                        # Aplica ranking contextual (com ou sem ocasião específica)
-                        scored = _apply_contextual_ranking(scored, has_context, termo_normalizado)
-                        
-                        if has_context:
-                            _safe_print(f"🎯 [CONTEXTO DETECTADO] Comprimento: {len(contexto_limpo)} chars")
-                            _safe_print(f"   Contexto: '{contexto_limpo[:100]}...'")
-                            _safe_print(f"   Estratégia: RANKING SEMÂNTICO (similaridade + preço)")
-                        else:
-                            if contexto_limpo:
-                                _safe_print(f"⚠️ [CONTEXTO MUITO CURTO] Comprimento: {len(contexto_limpo)} chars (mínimo: 5)")
-                            else:
-                                _safe_print(f"🔍 [BUSCA GENÉRICA] Nenhum contexto ou contexto vazio")
-                            _safe_print(f"   Estratégia: PRIORIZAÇÃO POR TIPO (QUADRO > FLOR > PELUCIA > CESTA > QUEBRA > CANECA > BAR)")
-
-                        temperature_scores = _softmax(
-                            [p["similarity"] for p in scored], temperature
-                        )
-                        for idx, item in enumerate(scored):
-                            item["temperature_score"] = temperature_scores[idx]
-                            item["ranking"] = idx + 1
-
-                        scored = scored[:top_k]
-
-                        exact_matches = [
-                            p
-                            for p in scored
-                            if p["similarity"] >= min_similarity or p["lexical_match"]
-                        ]
-                        fallback_matches = [
-                            p
-                            for p in scored
-                            if p not in exact_matches
-                        ]
-
-                        exact_matches = [
-                            p
-                            for p in scored
-                            if p["similarity"] >= min_similarity or p["lexical_match"]
-                        ]
-                        fallback_matches = [
-                            p
-                            for p in scored
-                            if p not in exact_matches
-                        ]
-
-                        structured = {
-                            "status": "found" if scored else "not_found",
-                            "termo": termo,
-                            "exatos": [
-                                {
-                                    "ranking": p["ranking"],
-                                    "id": str(p["id"]),
-                                    "nome": p["name"],
-                                    "preco": float(p["price"]),
-                                    "descricao": p["description"],
-                                    "imagem": p.get("image_url")
-                                    or "https://api.cestodamore.com.br/images/default-product.webp",
-                                    "production_time": int(p["production_time"])
-                                    if p.get("production_time") is not None
-                                    else 1,
-                                    "tipo_resultado": "EXATO",
-                                }
-                                for p in exact_matches
-                            ],
-                            "fallback": [
-                                {
-                                    "ranking": p["ranking"],
-                                    "id": str(p["id"]),
-                                    "nome": p["name"],
-                                    "preco": float(p["price"]),
-                                    "descricao": p["description"],
-                                    "imagem": p.get("image_url")
-                                    or "https://api.cestodamore.com.br/images/default-product.webp",
-                                    "production_time": int(p["production_time"])
-                                    if p.get("production_time") is not None
-                                    else 1,
-                                    "tipo_resultado": "FALLBACK",
-                                }
-                                for p in fallback_matches
-                            ],
-                        }
-
-                        for p in scored:
-                            tipo = (
-                                "EXATO"
-                                if p in exact_matches
-                                else "FALLBACK"
-                            )
-                            product_type = p.get("product_type", "CESTA")
-                            ranking_reason = p.get("ranking_reason", "DESCONHECIDO")
-                            price = float(p['price'])
-                            sim_score = p['similarity']
-                            _safe_print(
-                                f"  ✅ [{tipo}] #{p['ranking']:2d} | {product_type:15} | {p['name']:<35} | R$ {price:7.2f} | SIM={sim_score:.3f} | {ranking_reason}"
-                            )
-
-                        return json.dumps(structured, ensure_ascii=False)
-                except Exception as e:
-                    _safe_print(f"⚠️ Falha no ranking semântico, usando busca lexical: {e}")
-
-            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com", "cliente", "procura", "queria", "quero"}
-            
-            # Adiciona variantes (com e sem acento) para aumentar matching lexical
+            # Função auxiliar para gerar variantes (com/sem acento)
             def get_variants(t):
-                if not t: return []
-                v = [t]
-                # Remove acentos
+                if not t: 
+                    return []
+                variants = [t]
                 no_accents = "".join(
                     c for c in unicodedata.normalize("NFD", t)
                     if unicodedata.category(c) != "Mn"
                 )
                 if no_accents != t:
-                    v.append(no_accents)
-                return v
+                    variants.append(no_accents)
+                return variants
 
-            # Começa com termo_normalizado (maior prioridade)
-            search_terms = list(dict.fromkeys(get_variants(termo_normalizado)))
+            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
             
-            # Depois adiciona palavras individuais do termo normalizado
+            # Constrói lista de termos para buscar
+            search_terms = list(dict.fromkeys(get_variants(termo_normalizado)))
             for w in termo_normalizado.split():
                 if w.strip().lower() not in common_words and len(w.strip()) > 2:
                     search_terms.extend(get_variants(w.strip()))
-            
-            # Depois palavras-chave do contexto se for curto
-            if contexto_limpo and len(contexto_limpo) < 100:
-                for w in contexto_limpo.split():
-                    if w.strip().lower() not in common_words and len(w.strip()) > 3:
-                        search_terms.extend(get_variants(w.strip()))
-
-            # Finalmente, variantes do termo original
             search_terms.extend(get_variants(termo))
-            
-            # Remove duplicatas mantendo ordem
             search_terms = list(dict.fromkeys([t for t in search_terms if t.strip()]))
             
-            if len(search_terms) > 1:
-                _safe_print(f"🔑 Multi-term search variants: {search_terms}")
+            _safe_print(f"🔑 Termos de busca: {search_terms[:3]}")
+
             all_rows = []
-            search_terms_tested = []
             
+            # Busca com cada termo
             for search_term in search_terms:
-                if not search_term.strip():
+                if not search_term.strip() or search_term.strip().lower() in common_words:
                     continue
-                    
-                search_terms_tested.append(search_term)
+                
                 query = """
-                WITH input_params AS (
-                    SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
-                ),
-                products_scored AS (
-                  SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
-                  (
-                    -- Name exact match (highest priority = 100)
-                    (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
-                    -- Description/Tags content match (medium priority = 50)
-                    (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
-                    -- Word-boundary matches in tags (lower priority = 30)
-                    (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
-                  ) as relevance_score,
-                  -- is_exact_match: score >= 50 means term is explicitly in name or description
-                  (CASE WHEN 
-                    p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
-                    p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
-                   THEN true ELSE false END) as is_exact_match
-                  FROM public."Product" p
-                  WHERE p.price >= (SELECT preco_minimo FROM input_params) 
-                    AND p.price <= (SELECT preco_maximo FROM input_params)
-                    AND p.is_active = true
-                    AND NOT (p.id::TEXT = ANY($4::TEXT[]))
-                )
-                SELECT 
-                  id, name, description, price, image_url, production_time, relevance_score, is_exact_match,
-                  ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
-                FROM products_scored 
-                WHERE relevance_score > 0
-                ORDER BY is_exact_match DESC, ranking ASC
-                LIMIT 10;
+                SELECT id, name, description, price, image_url, production_time,
+                       (CASE WHEN name ILIKE $1 THEN 100 ELSE 0 END +
+                        CASE WHEN description ILIKE $1 THEN 50 ELSE 0 END) as relevance_score,
+                       (name ILIKE $1 OR description ILIKE $1) as is_exact_match
+                FROM public."Product"
+                WHERE price >= $2 AND price <= $3 AND is_active = true
+                  AND NOT (id::TEXT = ANY($4::TEXT[]))
+                ORDER BY is_exact_match DESC, relevance_score DESC, price ASC
+                LIMIT $5;
                 """
                 
-                _safe_print(f"🔍 Testando termo: '{search_term}'")
-                start_time = lib_time.time()
-                rows = await conn.fetch(query, search_term, preco_maximo, preco_minimo, exclude_ids)
-                duration = lib_time.time() - start_time
-                _safe_print(f"⏱️ termo '{search_term}' retornou {len(rows)} produtos em {duration:.2f}s")
-                
+                rows = await conn.fetch(query, f"%{search_term}%", preco_minimo, preco_maximo, exclude_ids, top_k)
                 for row in rows:
                     if not any(r['id'] == row['id'] for r in all_rows):
                         all_rows.append(row)
             
-            # Converte asyncpg.Record para dicionários mutáveis e adiciona categorização
-            all_rows_dict = [dict(r) for r in all_rows]
+            # Separa exatos de fallback
+            exact_matches = [dict(r) for r in all_rows if r['is_exact_match']]
+            fallback_matches = [dict(r) for r in all_rows if not r['is_exact_match']]
             
-            for r in all_rows_dict:
-                r['product_type'] = _categorize_product_type(r.get('name', ''), r.get('description', ''))
-                r['similarity'] = r.get('relevance_score', 0) / 100.0
+            exact_matches = exact_matches[:top_k]
+            fallback_matches = fallback_matches[:max(0, top_k - len(exact_matches))]
             
-            # Aplica ranking contextual
-            scored_lexical = _apply_contextual_ranking(all_rows_dict, bool(contexto_limpo and len(contexto_limpo) > 5), termo_normalizado)
-            
-            # Re-ordena aplicando prioridade de exatidão (exatos primeiro)
-            exact_lexical = [r for r in scored_lexical if r['is_exact_match']]
-            fallback_lexical = [r for r in scored_lexical if not r['is_exact_match']]
-            rows = exact_lexical + fallback_lexical
-            
-            # Recalcula ranking após reordenação
-            for idx, r in enumerate(rows, 1):
-                r['ranking'] = idx
-            
-            # Returns up to 10 products for the IA to have context, but she must display only 2 per message.
-            rows = rows[:10]
-            
-            _safe_print(f"🔍 consultarCatalogo: termo original='{termo}', testou {len(search_terms_tested)} keywords, preço=[{preco_minimo}-{preco_maximo}], exclude={len(exclude_ids)} IDs")
-            
-            if not rows:
-                if len(search_terms) > 1:
-                    _safe_print(f"⚠️ Nenhum resultado encontrado. Tentando termo original: '{termo}'")
-                    single_query = """
-                    WITH input_params AS (
-                        SELECT LOWER($1) as termo, $2::float as preco_maximo, $3::float as preco_minimo
-                    ),
-                    products_scored AS (
-                      SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
-                      (
-                        (CASE WHEN p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 100 ELSE 0 END) +
-                        (CASE WHEN p.description ILIKE '%' || (SELECT termo FROM input_params) || '%' THEN 50 ELSE 0 END) +
-                        (CASE WHEN p.description ~* ('\\b' || (SELECT termo FROM input_params) || '\\b') THEN 30 ELSE 0 END)
-                      ) as relevance_score,
-                      (CASE WHEN 
-                        p.name ILIKE '%' || (SELECT termo FROM input_params) || '%' OR
-                        p.description ILIKE '%' || (SELECT termo FROM input_params) || '%'
-                       THEN true ELSE false END) as is_exact_match
-                      FROM public."Product" p
-                      WHERE p.price >= (SELECT preco_minimo FROM input_params) 
-                        AND p.price <= (SELECT preco_maximo FROM input_params)
-                        AND p.is_active = true
-                        AND NOT (p.id::TEXT = ANY($4::TEXT[]))
-                    )
-                    SELECT 
-                      id, name, description, price, image_url, production_time, relevance_score, is_exact_match,
-                      ROW_NUMBER() OVER (ORDER BY is_exact_match DESC, relevance_score DESC, price DESC) as ranking
-                    FROM products_scored 
-                    WHERE relevance_score > 0
-                    ORDER BY is_exact_match DESC, ranking ASC
-                    LIMIT 10;
-                    """
-                    rows = await conn.fetch(single_query, termo_normalizado, preco_maximo, preco_minimo, exclude_ids)
-
-                if not rows and exclude_ids:
-                    _safe_print("🔁 Fallback: tentando sem exclusões")
-                    rows = await conn.fetch(single_query, termo_normalizado, preco_maximo, preco_minimo, [])
-
-                if not rows:
-                    term_lower = termo_normalizado.lower()
-                    fallback_terms = []
-                    if any(t in term_lower for t in ["cesto", "cesta", "presente"]):
-                        fallback_terms.append("cesto")
-                    if any(t in term_lower for t in ["buquê", "buque", "flores", "rosa"]):
-                        fallback_terms.append("buquê")
-                    if "caneca" in term_lower:
-                        fallback_terms.append("caneca")
-                    if any(t in term_lower for t in ["romant", "românt", "namorad"]):
-                        fallback_terms.extend(["romântica", "namorados"])
-                    if "anivers" in term_lower:
-                        fallback_terms.append("aniversário")
-                    if "bar" in term_lower:
-                        fallback_terms.append("bar")
-                    if "chocolate" in term_lower:
-                        fallback_terms.append("chocolate")
-                    if any(t in term_lower for t in ["pelucia", "pelúcia", "urso"]):
-                        fallback_terms.append("pelúcia")
-                    if "quebra" in term_lower:
-                        fallback_terms.append("quebra-cabeça")
-                    if "quadro" in term_lower:
-                        fallback_terms.append("quadro")
-
-                    fallback_terms = list(dict.fromkeys([t for t in fallback_terms if t]))
-                    for fallback_term in fallback_terms:
-                        _safe_print(f"🔁 Fallback: tentando termo similar '{fallback_term}'")
-                        rows = await conn.fetch(
-                            single_query,
-                            fallback_term,
-                            preco_maximo,
-                            preco_minimo,
-                            [],
-                        )
-                        if rows:
-                            break
-                
-                if not rows:
-                    return f"❌ Nenhum produto encontrado para '{termo}'. Desculpa! 😔"
-            
-            exact_matches = [r for r in rows if r['is_exact_match']]
-            fallback_matches = [r for r in rows if not r['is_exact_match']]
-            
-            is_caneca_search = 'caneca' in termo_normalizado.lower()
+            _safe_print(f"📦 Encontrados {len(exact_matches)} exatos + {len(fallback_matches)} fallback")
             
             structured = {
-                "status": "found" if rows else "not_found",
+                "status": "found" if (exact_matches or fallback_matches) else "not_found",
                 "termo": termo,
+                "contexto": contexto_limpo,
                 "exatos": [
                     {
-                        "ranking": r['ranking'],
+                        "ranking": idx + 1,
                         "id": str(r['id']),
                         "nome": r['name'],
                         "preco": float(r['price']),
                         "descricao": r['description'],
-                        "imagem": r['image_url'] or "https://api.cestodamore.com.br/images/default-product.webp",
-                        "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
+                        "imagem": r.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
+                        "production_time": int(r['production_time']) if r.get('production_time') else 1,
                         "tipo_resultado": "EXATO",
                     }
-                    for r in exact_matches
+                    for idx, r in enumerate(exact_matches)
                 ],
                 "fallback": [
                     {
-                        "ranking": r['ranking'],
+                        "ranking": len(exact_matches) + idx + 1,
                         "id": str(r['id']),
                         "nome": r['name'],
                         "preco": float(r['price']),
                         "descricao": r['description'],
-                        "imagem": r['image_url'] or "https://api.cestodamore.com.br/images/default-product.webp",
-                        "production_time": int(r['production_time']) if r['production_time'] is not None else 1,
+                        "imagem": r.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
+                        "production_time": int(r['production_time']) if r.get('production_time') else 1,
                         "tipo_resultado": "FALLBACK",
                     }
-                    for r in fallback_matches
+                    for idx, r in enumerate(fallback_matches)
                 ]
             }
             
-            for r in rows:
-                tipo = "EXATO" if r['is_exact_match'] else "FALLBACK"
-                _safe_print(f"  ✅ [{tipo}] Ranking {r['ranking']}: {r['name']} - R$ {r['price']:.2f}")
-            
             return json.dumps(structured, ensure_ascii=False)
-        except Exception as e:
-            _safe_print(f"❌ Erro em consultarCatalogo: {e}")
-            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
-@mcp.tool()
-async def get_adicionais() -> str:
+    except ValueError as ve:
+        _safe_print(f"⚠️ Erro de validação: {ve}")
+        return json.dumps({
+            "status": "error",
+            "error_type": "validation_error",
+            "message": str(ve),
+        }, ensure_ascii=False)
+    except Exception as e:
+        _safe_print(f"❌ Erro em consultarCatalogo: {e}")
+        return json.dumps({
+            "status": "error", 
+            "error_type": "database_error",
+            "message": str(e)
+        }, ensure_ascii=False)
+
+
     """Retorna itens adicionais (Balões, Chocolates, Ursos) para a cesta."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -2049,68 +1764,157 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
         return f"⚠️ Erro ao validar: {str(e)}"
 
 @mcp.tool()
-async def get_product_details(product_id: str) -> str:
+async def get_product_details(product_name: str) -> str:
     """
-    Busca nome, preço, descrição e COMPONENTES do produto.
-    OBRIGATÓRIO: Ler 'componentes' antes de responder o que tem na cesta.
-    Não alucine itens não listados.
+    🔍 Busca detalhes de um produto pelo NOME (não ID).
+    
+    Retorna:
+    - Nome, preço, descrição, componentes
+    - Se houver múltiplas correspondências, lista as 3 primeiras
+    - Se houver exatamente 1, retorna detalhes completos
+    
+    Args:
+        product_name: Nome do produto (busca parcial, case-insensitive)
+                     Ex: "cesto romantico", "buquê red", "caneca personalizada"
+    
+    Returns:
+        JSON: {"status": "found"|"ambiguous"|"not_found", ...}
+        - "found": 1 resultado exato com componentes
+        - "ambiguous": Múltiplos resultados, lista opções
+        - "not_found": Nenhum produto encontrado
     """
+    
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            product_id_str = str(product_id)
+            product_name_clean = (product_name or "").strip()
             
-            # Busca dados básicos do produto
-            product_query = """
-            SELECT id, name, description, price, production_time
-            FROM public."Product"
-            WHERE id = $1
-            LIMIT 1;
-            """
-            product_row = await conn.fetchrow(product_query, product_id_str)
-            
-            if not product_row:
+            if not product_name_clean:
                 return json.dumps({
-                    "status": "not_found",
-                    "message": f"Produto com ID {product_id_str} não encontrado"
+                    "status": "error",
+                    "message": "Nome do produto não pode estar vazio"
                 }, ensure_ascii=False)
             
-            # Busca componentes do produto
-            components_query = """
-            SELECT i.name, pc.quantity
-            FROM public."ProductComponent" pc
-            JOIN public."Item" i ON pc.item_id = i.id
-            WHERE pc.product_id = $1
-            ORDER BY i.name ASC;
-            """
-            component_rows = await conn.fetch(components_query, product_id_str)
+            _safe_print(f"🔍 Buscando produto: '{product_name_clean}'")
             
-            componentes = [
-                {
-                    "nome": r['name'],
-                    "quantidade": r['quantity']
+            # Busca por correspondência parcial - prioriza exatos primeiro
+            search_query = """
+            SELECT id, name, description, price, production_time,
+                   (name ILIKE $1) as is_exact_match
+            FROM public."Product"
+            WHERE name ILIKE $2 AND is_active = true
+            ORDER BY is_exact_match DESC, name ASC
+            LIMIT 3;
+            """
+            
+            # Tenta primeiro uma correspondência exata (nome completo)
+            exact_match = await conn.fetchrow(search_query, product_name_clean, f"{product_name_clean}%")
+            
+            if exact_match:
+                # Se encontrou exato, busca componentes
+                components_query = """
+                SELECT i.name, pc.quantity
+                FROM public."ProductComponent" pc
+                JOIN public."Item" i ON pc.item_id = i.id
+                WHERE pc.product_id = $1
+                ORDER BY i.name ASC;
+                """
+                component_rows = await conn.fetch(components_query, exact_match['id'])
+                
+                componentes = [
+                    {
+                        "nome": r['name'],
+                        "quantidade": r['quantity']
+                    }
+                    for r in component_rows
+                ]
+                
+                structured = {
+                    "status": "found",
+                    "id": str(exact_match['id']),
+                    "nome": exact_match['name'],
+                    "preco": float(exact_match['price']),
+                    "descricao": exact_match['description'] or "",
+                    "production_time": int(exact_match['production_time'] or 0),
+                    "componentes": componentes
                 }
-                for r in component_rows
+                
+                _safe_print(f"✅ Produto exato encontrado: {exact_match['name']} ({len(componentes)} componentes)")
+                return json.dumps(structured, ensure_ascii=False)
+            
+            # Se não encontrou exato, tenta busca parcial
+            partial_matches = await conn.fetch(search_query, None, f"%{product_name_clean}%")
+            
+            if not partial_matches:
+                _safe_print(f"❌ Nenhum produto encontrado para: {product_name_clean}")
+                return json.dumps({
+                    "status": "not_found",
+                    "message": f"Nenhum produto encontrado com nome '{product_name_clean}'"
+                }, ensure_ascii=False)
+            
+            if len(partial_matches) == 1:
+                # Se houver apenas 1 correspondência parcial, retorna detalhes completos
+                product = partial_matches[0]
+                components_query = """
+                SELECT i.name, pc.quantity
+                FROM public."ProductComponent" pc
+                JOIN public."Item" i ON pc.item_id = i.id
+                WHERE pc.product_id = $1
+                ORDER BY i.name ASC;
+                """
+                component_rows = await conn.fetch(components_query, product['id'])
+                
+                componentes = [
+                    {
+                        "nome": r['name'],
+                        "quantidade": r['quantity']
+                    }
+                    for r in component_rows
+                ]
+                
+                structured = {
+                    "status": "found",
+                    "id": str(product['id']),
+                    "nome": product['name'],
+                    "preco": float(product['price']),
+                    "descricao": product['description'] or "",
+                    "production_time": int(product['production_time'] or 0),
+                    "componentes": componentes
+                }
+                
+                _safe_print(f"✅ Produto parcial encontrado: {product['name']} ({len(componentes)} componentes)")
+                return json.dumps(structured, ensure_ascii=False)
+            
+            # Se houver múltiplas correspondências, lista as opções
+            _safe_print(f"⚠️ {len(partial_matches)} produtos encontrados para '{product_name_clean}'")
+            
+            opcoes = [
+                {
+                    "id": str(p['id']),
+                    "nome": p['name'],
+                    "preco": float(p['price']),
+                    "descricao": p['description'] or ""
+                }
+                for p in partial_matches[:3]
             ]
             
             structured = {
-                "status": "found",
-                "id": str(product_row['id']),
-                "nome": product_row['name'],
-                "preco": float(product_row['price']),
-                "descricao": product_row['description'] or "",
-                "production_time": int(product_row['production_time'] or 0),
-                "componentes": componentes,
-                "_debug": f"Total de {len(componentes)} componentes encontrados"
+                "status": "ambiguous",
+                "busca_original": product_name_clean,
+                "opcoes_encontradas": len(partial_matches),
+                "opcoes": opcoes,
+                "mensagem": f"Encontrei {len(partial_matches)} produtos semelhantes. Qual destes é o que você quer?"
             }
-            
-            _safe_print(f"📦 get_product_details: {product_row['name']} | {len(componentes)} componentes")
             
             return json.dumps(structured, ensure_ascii=False)
             
         except Exception as e:
             _safe_print(f"❌ Erro em get_product_details: {e}")
-            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+            return json.dumps({
+                "status": "error",
+                "message": str(e)
+            }, ensure_ascii=False)
+
 
 @mcp.tool()
 async def get_active_holidays() -> str:

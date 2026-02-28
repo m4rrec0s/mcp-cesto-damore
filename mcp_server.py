@@ -1917,6 +1917,192 @@ async def get_product_details(product_name: str) -> str:
 
 
 @mcp.tool()
+async def can_produce_in_time(product_name: str, delivery_date: str, delivery_time: str) -> str:
+    """
+    ⏱️ Verifica se um produto pode ser produzido até a data/hora escolhida.
+    
+    Calcula o tempo de produção respeitando horários comerciais (ignorando fins de semana e feriados).
+    Se o produto conseguir ser produzido a tempo, retorna quando ficará pronto.
+    
+    Args:
+        product_name: Nome exato do produto (ex: "Café d'Amore G", "Caneca Personalizada")
+        delivery_date: Data da entrega desejada (formato: DD/MM/YYYY)
+        delivery_time: Hora da entrega (formato: HH:MM, ex: "09:00")
+    
+    Returns:
+        JSON com:
+        - "possible": true/false
+        - "product_name": nome do produto
+        - "production_time_hours": horas de produção necessárias
+        - "earliest_ready": quando ficaria pronto no máximo (data + hora)
+        - "requested_deadline": quando cliente quer receber
+        - "message": mensagem humanizada explicando o resultado
+    """
+    
+    try:
+        # Valida formato da data
+        try:
+            delivery_dt = datetime.strptime(f"{delivery_date} {delivery_time}", "%d/%m/%Y %H:%M")
+        except ValueError:
+            return json.dumps({
+                "status": "error",
+                "message": "Formato inválido. Use DD/MM/YYYY para data e HH:MM para hora"
+            }, ensure_ascii=False)
+        
+        delivery_date_obj = delivery_dt.date()
+        delivery_time_obj = delivery_dt.time()
+        
+        now_local = _get_local_time()
+        
+        _safe_print(f"⏱️ [PRODUCE-CHECK] Produto: '{product_name}' | Entrega: {delivery_date} {delivery_time} | Agora: {now_local.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Busca o produto
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            search_query = """
+            SELECT id, name, production_time, price
+            FROM public."Product"
+            WHERE name ILIKE $1 AND is_active = true
+            ORDER BY name ASC
+            LIMIT 1;
+            """
+            
+            product = await conn.fetchrow(search_query, f"{product_name}%")
+            
+            if not product:
+                _safe_print(f"❌ Produto não encontrado: {product_name}")
+                return json.dumps({
+                    "status": "not_found",
+                    "message": f"Produto '{product_name}' não encontrado no catálogo"
+                }, ensure_ascii=False)
+            
+            production_hours = int(product['production_time'] or 1)
+            produto_nome = product['name']
+            
+            # Se a data de entrega é no passado, retorna erro
+            if delivery_date_obj < now_local.date():
+                return json.dumps({
+                    "status": "deadline_passed",
+                    "message": f"A data {delivery_date} já passou. Escolha uma data futura."
+                }, ensure_ascii=False)
+            
+            # Se é hoje, valida se pode começar a partir de agora
+            if delivery_date_obj == now_local.date():
+                # Verifica se estamos dentro do horário comercial
+                day_key = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][now_local.date().weekday()]
+                business_hours = BUSINESS_HOURS.get(day_key, [])
+                
+                # Encontra em qual bloco estamos agora
+                current_block_start = None
+                current_block_end = None
+                
+                for block_start, block_end in business_hours:
+                    if block_start <= now_local.time() <= block_end:
+                        current_block_start = block_start
+                        current_block_end = block_end
+                        break
+                
+                # Se não estamos em horário comercial, começa do próximo bloco
+                if current_block_start is None:
+                    # Procura o próximo bloco de hoje
+                    for block_start, block_end in business_hours:
+                        if block_start > now_local.time():
+                            current_block_start = block_start
+                            current_block_end = block_end
+                            break
+                    
+                    # Se não houver próximo bloco hoje, começa de amanhã
+                    if current_block_start is None:
+                        start_calculation_date = now_local.date() + timedelta(days=1)
+                        start_calculation_time = time(0, 0)
+                    else:
+                        start_calculation_date = now_local.date()
+                        start_calculation_time = current_block_start
+                else:
+                    start_calculation_date = now_local.date()
+                    start_calculation_time = now_local.time()
+            else:
+                # Data é futura, começa do primeiro horário comercial daquele dia
+                start_calculation_date = delivery_date_obj
+                start_calculation_time = time(0, 0)
+            
+            # Calcula quando o produto ficará pronto
+            ready_date, ready_time = _calculate_ready_datetime(
+                datetime.combine(start_calculation_date, start_calculation_time),
+                production_hours,
+                BUSINESS_HOURS
+            )
+            
+            # Verifica se consegue terminar antes da entrega
+            ready_datetime = datetime.combine(ready_date, ready_time)
+            delivery_datetime = datetime.combine(delivery_date_obj, delivery_time_obj)
+            
+            is_possible = ready_datetime <= delivery_datetime
+            
+            # Formata resposta
+            day_names = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+            ready_day_name = day_names[ready_date.weekday()]
+            delivery_day_name = day_names[delivery_date_obj.weekday()]
+            
+            ready_str = f"{ready_day_name}, {ready_date.strftime('%d/%m')} às {ready_time.strftime('%H:%M')}"
+            delivery_str = f"{delivery_day_name}, {delivery_date} às {delivery_time}"
+            
+            structured = {
+                "status": "analyzed",
+                "possible": is_possible,
+                "product_name": produto_nome,
+                "production_time_hours": production_hours,
+                "earliest_ready": ready_str,
+                "requested_deadline": delivery_str,
+                "time_margin_minutes": int((delivery_datetime - ready_datetime).total_seconds() / 60) if is_possible else None
+            }
+            
+            if is_possible:
+                margin_minutes = int((delivery_datetime - ready_datetime).total_seconds() / 60)
+                if margin_minutes >= 60:
+                    margin_str = f"{margin_minutes // 60}h {margin_minutes % 60}m"
+                else:
+                    margin_str = f"{margin_minutes}m"
+                
+                message = f"""✅ Ótima notícia!
+
+A "{produto_nome}" tem um prazo de {production_hours}h de produção.
+
+Ela ficará pronta em {ready_str} (com {margin_str} de margem antes do horário que você pediu).
+
+Quer continuar com o pedido? 🎉"""
+                
+                _safe_print(f"✅ Produto CAN ser produzido a tempo | Pronto: {ready_str} | Entrega: {delivery_str} | Margem: {margin_str}")
+            else:
+                delay_minutes = int((ready_datetime - delivery_datetime).total_seconds() / 60)
+                if delay_minutes >= 60:
+                    delay_str = f"{delay_minutes // 60}h {delay_minutes % 60}m"
+                else:
+                    delay_str = f"{delay_minutes}m"
+                
+                message = f"""⚠️ Nessa data/hora não vai dar!
+
+A "{produto_nome}" tem um prazo de {production_hours}h de produção.
+
+Ela ficaria pronta em {ready_str} - {delay_str} depois do horário que você pediu 😔
+
+Quer escolher outro horário ou outro produto? 🎁"""
+                
+                _safe_print(f"❌ Produto NÃO pode ser produzido a tempo | Seria pronto: {ready_str} | Solicitado: {delivery_str} | Atraso: {delay_str}")
+            
+            structured["message"] = message
+            
+            return json.dumps(structured, ensure_ascii=False)
+    
+    except Exception as e:
+        _safe_print(f"❌ Erro em can_produce_in_time: {e}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
 async def get_active_holidays() -> str:
     """Retorna datas em que a loja estará FECHADA (Feriados)."""
     pool = await get_db_pool()

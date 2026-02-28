@@ -1183,9 +1183,11 @@ async def consultarCatalogo(
 ) -> str:
     """
     🔍 Busca produtos no catálogo usando contexto OBRIGATÓRIO.
-    
+
     CRÍTICO: contexto é OBRIGATÓRIO - sem ele os resultados são errados!
-    
+    CRÍTICO: Ao buscar "mais opções", SEMPRE passe os IDs dos produtos já mostrados em exclude_ids!
+             Sem exclude_ids, os MESMOS produtos serão retornados toda vez (busca determinística).
+
     Args:
         termo: Tipo/nome do produto (e.g., "cesto romantico", "buquê")
         contexto: OBRIGATÓRIO - Contexto COMPLETO com ocasião, motivo, destinatário, orçamento
@@ -1194,9 +1196,14 @@ async def consultarCatalogo(
                   ❌ "presente" - MUITO VAGO
         preco_minimo: Mínimo opcional (inferido do contexto se não fornecido)
         preco_maximo: Máximo opcional (inferido do contexto se não fornecido)
-        exclude_ids: IDs já mostrados (evita repetição)
+        exclude_ids: OBRIGATÓRIO quando o cliente pede "mais opções" ou já recebeu produtos antes.
+                     Liste os IDs de TODOS os produtos já apresentados nesta conversa.
+                     Isso garante que produtos diferentes sejam retornados a cada chamada.
+                     ✅ ["123", "456"] — quando os produtos de id 123 e 456 já foram mostrados
+                     ✅ ["123", "456", "789"] — terceira rodada, três produtos excluídos
+                     ❌ [] ou None — quando já houve apresentação anterior (causa repetição!)
         top_k: Quantidade de resultados (max 10, default 10)
-    
+
     Retorna: JSON com status, termos, e listas de produtos exatos e fallback.
     """
     try:

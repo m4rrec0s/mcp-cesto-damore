@@ -2601,11 +2601,11 @@ async def proc_validar_horario_funcionamento() -> str:
        "Das 12:00 às 14:00 a gente fica em intervalo, mas já retorna! ⏰"
        
        Se perguntar sobre domingo:
-       "Domingos a gente descansa, mas segunda abrimos cedinho às 7:30! Quer marcar pra lá? ❤️"
+       "Domingos a gente descansa, mas segunda abrimos cedinho às 8:30! Quer marcar pra lá? ❤️"
     
     NUNCA:
     - Invente horários diferentes dos informados
-    - Diga que abre às 8h de segunda a sexta (ERRADO: é 7:30)
+    - Diga que abre às 8h de segunda a sexta (ERRADO: é 8:30)
     - Processe pedidos no domingo
     - Ignore intervalos/pausas
     
@@ -2614,7 +2614,7 @@ async def proc_validar_horario_funcionamento() -> str:
     Você: "✅ Estamos sim! Funcionamos até as 17:00 hoje. Pode fazer seu pedido! 🌹"
     
     Cliente: "E aos domingos?"
-    Você: "Domingos a gente descansa, mas segunda abrimos cedinho às 7:30! Quer marcar pra lá? ❤️"
+    Você: "Domingos a gente descansa, mas segunda abrimos cedinho às 8:30! Quer marcar pra lá? ❤️"
     
     Cliente: "Quero entregar sábado"
     Você: [Chame validate_delivery_availability('2026-01-11')] e retorna a resposta da tool

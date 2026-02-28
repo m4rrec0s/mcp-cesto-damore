@@ -484,12 +484,16 @@ def _apply_contextual_ranking(
 ) -> List[Dict[str, Any]]:
     """
     Aplica ranking contextual aos produtos.
-    
-    Se tem contexto (cliente especificou ocasião):
-        - Ordena por similaridade semântica decrescente
-        - Aplica penalidade a canecas (salvo se busca explícita por "caneca")
-    Se NÃO tem contexto (busca genérica):
-        - Prioridade por tipo: QUADRO > FLOR > PELUCIA > CESTA > QUEBRA > CANECA > BAR
+
+    Prioridade (tanto com contexto quanto sem):
+        1. Tipo: QUADRO_FOTO > FLOR > PELUCIA > CESTA > BAR_DRINKS > QUEBRA_CABECA > CANECA
+        2. Preço: mais caro primeiro (dentro do mesmo tipo)
+        3. Similaridade semântica: desempate final
+
+    Exceções:
+        - Se busca explícita por "caneca" → CANECA vira prioridade máxima
+        - Se busca explícita por "quebra" → QUEBRA_CABECA vira prioridade máxima
+        - Se busca explícita por "quadro/polaroide" → QUADRO_FOTO vira prioridade máxima
     """
     search_lower = search_term.lower().strip()
     is_caneca_search = "caneca" in search_lower
@@ -502,48 +506,38 @@ def _apply_contextual_ranking(
             product.get("description", "")
         )
 
-    if has_context:
-        CANECA_PENALTY = 0.15
-        for product in scored_products:
-            if product["product_type"] == "CANECA" and not is_caneca_search:
-                product["similarity"] = max(0.0, product["similarity"] - CANECA_PENALTY)
-                product["ranking_reason"] = "CONTEXTO_SEMÂNTICO (penalidade caneca)"
-            else:
-                product["ranking_reason"] = "CONTEXTO_SEMÂNTICO"
-
-        sorted_products = sorted(
-            scored_products,
-            key=lambda p: (p["similarity"], -float(p.get("price") or 0.0)),
-            reverse=True
-        )
-        return sorted_products
-    
-    # Sem contexto: aplica prioridades por tipo + preço DESC (mais caro primeiro)
+    # Prioridade base por tipo — QUADRO primeiro, CANECA e QUEBRA por último
     type_priority = {
-        "QUADRO_FOTO": 1,
-        "FLOR": 2,
-        "PELUCIA": 3,
-        "CESTA": 4,
-        "QUEBRA_CABECA": 5,
-        "CANECA": 6,
-        "BAR_DRINKS": 7,
+        "QUADRO_FOTO":  1,
+        "PELUCIA":      2,
+        "FLOR":         3,
+        "CESTA":        4,
+        "BAR_DRINKS":   5,
+        "QUEBRA_CABECA":6,
+        "CANECA":       7,
     }
-    
+
+    # Ajuste de prioridade quando a busca é explícita para um tipo específico
+    if is_caneca_search:
+        type_priority["CANECA"] = 1
+    if is_quebra_search:
+        type_priority["QUEBRA_CABECA"] = 1
+    if is_quadro_search:
+        type_priority["QUADRO_FOTO"] = 1
+
     for product in scored_products:
         product["type_priority"] = type_priority.get(product["product_type"], 999)
-    
+        product["ranking_reason"] = f"TIPO:{product['product_type']} | PREÇO:{product.get('price')}"
+
     sorted_products = sorted(
         scored_products,
         key=lambda p: (
-            p["type_priority"],
-            -float(p.get("price") or 0.0),
-            -p["similarity"],
+            p["type_priority"],            # 1º: tipo (menor = melhor)
+            -float(p.get("price") or 0.0), # 2º: preço (maior = melhor)
+            -p.get("similarity", 0.0),     # 3º: similaridade semântica
         )
     )
-    
-    for product in sorted_products:
-        product["ranking_reason"] = f"TIPO_GENÉRICO:{product['product_type']}"
-    
+
     return sorted_products
 
 def _parse_price_value(raw_value: str) -> Optional[float]:
@@ -1449,15 +1443,23 @@ def _calculate_ready_datetime(
 @mcp.tool()
 async def validate_delivery_availability(date_str: str, time_str: Optional[str] = None, production_time_hours: Optional[int] = None) -> str:
     """
-    Verifica se podemos entregar em Data (YYYY-MM-DD) e Hora (HH:MM).
-    Retorna disponibilidade ou "suggested_slots" (blocos de horario) se hora nao for informada.
-    SEMPRE mostre os suggested_slots ao cliente.
+    📅 Verifica disponibilidade de entrega para uma data/hora SEM produto específico definido.
+
+    USE QUANDO:
+    - Cliente pergunta de forma aberta: "consegue entregar amanhã?", "que horas vocês entregam?", "tem entrega no sábado?"
+    - Cliente quer saber os horários disponíveis em uma data, sem ainda ter escolhido produto.
+    - Cliente menciona uma data mas ainda não escolheu nenhum produto.
+
+    NÃO USE QUANDO:
+    - Cliente já escolheu um produto específico e quer saber se dá pra entregar naquele horário.
+      → Nesse caso use `can_produce_in_time` (verifica produção + entrega do produto escolhido).
+
+    Retorna slots disponíveis ou indisponibilidade. SEMPRE apresente os suggested_slots ao cliente.
 
     Args:
         date_str: Data desejada no formato YYYY-MM-DD
         time_str: Hora desejada no formato HH:MM (opcional)
-        production_time_hours: Tempo de producao do produto em horas comerciais (opcional, padrao: 1).
-                               Passe o production_time do produto consultado via consultarCatalogo ou get_product_details.
+        production_time_hours: Tempo de produção em horas comerciais (opcional, padrao: 1).
     """
     try:
         date_str_validated, tz_debug = _validate_timezone_safety(date_str)
@@ -1917,16 +1919,24 @@ async def get_product_details(product_name: str) -> str:
 @mcp.tool()
 async def can_produce_in_time(product_name: str, delivery_date: str, delivery_time: str) -> str:
     """
-    ⏱️ Verifica se um produto pode ser produzido até a data/hora escolhida.
-    
-    Calcula o tempo de produção respeitando horários comerciais (ignorando fins de semana e feriados).
-    Se o produto conseguir ser produzido a tempo, retorna quando ficará pronto.
-    
+    ⏱️ Verifica se um produto JA ESCOLHIDO pelo cliente pode ser produzido a tempo para entrega.
+
+    USE QUANDO:
+    - Cliente já escolheu um produto específico e informou uma data/hora de entrega.
+    - Agente-Fechamento precisa confirmar viabilidade de produção antes de fechar o pedido.
+    - Exemplo: cliente escolheu a "Cesta Romantica" e quer saber se dá pra entregar sábado às 9h.
+
+    NÃO USE QUANDO:
+    - Cliente ainda não escolheu produto e está só perguntando sobre horários em geral.
+      → Nesse caso use `validate_delivery_availability` (verifica slots sem produto definido).
+
+    Calcula o tempo de produção do produto respeitando horários comerciais (ignora fins de semana e feriados).
+
     Args:
-        product_name: Nome exato do produto (ex: "Café d'Amore G", "Caneca Personalizada")
+        product_name: Nome exato do produto já escolhido (ex: "Café d'Amore G", "Caneca Personalizada")
         delivery_date: Data da entrega desejada (formato: DD/MM/YYYY)
         delivery_time: Hora da entrega (formato: HH:MM, ex: "09:00")
-    
+
     Returns:
         JSON com:
         - "possible": true/false

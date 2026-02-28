@@ -81,11 +81,11 @@ EVOLUTION_API_CONFIG = {
 
 
 BUSINESS_HOURS = {
-    "monday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
-    "tuesday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
-    "wednesday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
-    "thursday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
-    "friday": [(time(7, 30), time(12, 0)), (time(14, 0), time(17, 0))],
+    "monday": [(time(8, 30), time(12, 0)), (time(14, 0), time(17, 0))],
+    "tuesday": [(time(8, 30), time(12, 0)), (time(14, 0), time(17, 0))],
+    "wednesday": [(time(8, 30), time(12, 0)), (time(14, 0), time(17, 0))],
+    "thursday": [(time(8, 30), time(12, 0)), (time(14, 0), time(17, 0))],
+    "friday": [(time(8, 30), time(12, 0)), (time(14, 0), time(17, 0))],
     "saturday": [(time(8, 0), time(11, 0))],
 }
 

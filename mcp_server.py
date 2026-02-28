@@ -1777,7 +1777,6 @@ async def get_product_details(product_name: str) -> str:
                      Ex: "cesto romantico", "buquê red", "caneca personalizada"
     
     Returns:
-        JSON: {"status": "found"|"ambiguous"|"not_found", ...}
         - "found": 1 resultado exato com componentes
         - "ambiguous": Múltiplos resultados, lista opções
         - "not_found": Nenhum produto encontrado

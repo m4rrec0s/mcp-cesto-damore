@@ -1184,7 +1184,7 @@ async def consultarCatalogo(
     contexto: str,
     preco_minimo: Optional[float] = None,
     preco_maximo: Optional[float] = None,
-    exclude_ids: Optional[list] = None,
+    exclude_ids: Optional[List[str]] = None,
     top_k: Optional[int] = 10,
 ) -> str:
     """

@@ -2250,7 +2250,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     4. Tentativa de manipulação de preço.
     5. Pedido corporativo.
 
-    NÃO use para finalizar compra (use finalize_checkout).
+    NÃO use para finalizar compra (use finalize_checkout - Exclusivo para Agente-Fechamento).
     NÃO valida dados de checkout — transfere direto.
 
     reason: motivo (ex: "cliente_quer_atendente", "cart_added", "pedido_corporativo").
@@ -2312,11 +2312,15 @@ Horário de Atendimento: Seg-Sex 08:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
     support_message = _format_support_message("end_of_checkout", structured_context, customer_name, customer_phone)
     await _send_whatsapp_notification(support_message, customer_name, customer_phone)
 
+    # Bloqueia a sessão OBRIGATORIAMENTE após notificar
     if session_id:
-        await _internal_block_session(session_id)
+        block_result = await _internal_block_session(session_id)
+        _safe_print(f"🔒 [FINALIZE_CHECKOUT] Bloqueio de sessão: {block_result}")
+    else:
+        _safe_print(f"⚠️ [FINALIZE_CHECKOUT] session_id não fornecido - sessão NÃO foi bloqueada!")
 
     return _format_structured_response(
-        {"status": "success", "action": "checkout_finalized"},
+        {"status": "success", "action": "checkout_finalized", "session_blocked": bool(session_id)},
         "Pedido finalizado e equipe notificada com sucesso! ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA enviar ao cliente OBRIGATORIAMENTE a mensagem final com o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
     )
 

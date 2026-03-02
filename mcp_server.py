@@ -1373,7 +1373,7 @@ async def consultarCatalogo(
                 FROM public."Product"
                 WHERE price >= $2 AND price <= $3 AND is_active = true
                   AND NOT (id::TEXT = ANY($4::TEXT[]))
-                ORDER BY is_exact_match DESC, relevance_score DESC, price ASC
+                ORDER BY is_exact_match DESC, relevance_score DESC, price DESC
                 LIMIT $5;
                 """
                 
@@ -1403,7 +1403,7 @@ async def consultarCatalogo(
                 exact_matches,
                 key=lambda r: (
                     -int(r.get("relevance_score") or 0),
-                    float(r.get("price") or 0),
+                    -float(r.get("price") or 0),
                 ),
             )
 
@@ -1446,7 +1446,7 @@ async def consultarCatalogo(
                         scored_fallback,
                         key=lambda r: (
                             -float(r.get("semantic_score") or -999),
-                            float(r.get("price") or 0),
+                            -float(r.get("price") or 0),
                         ),
                     )
 

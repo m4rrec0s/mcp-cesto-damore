@@ -588,6 +588,89 @@ def _extract_price_bounds(text: str) -> tuple[Optional[float], Optional[float]]:
 
     return None, None
 
+def _keyword_in_text(text: str, keywords: List[str]) -> bool:
+    lower_text = (text or "").lower()
+    return any(keyword in lower_text for keyword in keywords)
+
+def _infer_search_profile(termo: str, contexto: str) -> str:
+    combined = f"{termo} {contexto}".lower()
+
+    if _keyword_in_text(combined, ["cafe", "café", "manha", "manhã", "croissant", "pão de queijo"]):
+        return "BREAKFAST"
+    if _keyword_in_text(combined, ["buque", "buquê", "flores", "rosa", "rosas"]):
+        return "FLOWERS"
+    if _keyword_in_text(combined, ["caneca"]):
+        return "MUG"
+    if _keyword_in_text(combined, ["quadro", "polaroide", "polaroides", "foto"]):
+        return "PHOTO_FRAME"
+    if _keyword_in_text(combined, ["pelucia", "pelúcia", "urso", "ursinho"]):
+        return "PLUSH"
+
+    return "GENERIC"
+
+def _token_overlap_score(query_text: str, candidate_text: str) -> float:
+    query_tokens = set(_tokenize_context(query_text))
+    candidate_tokens = set(_tokenize_context(candidate_text))
+
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+
+    overlap = len(query_tokens.intersection(candidate_tokens))
+    return overlap / max(1, len(query_tokens))
+
+def _score_profile_alignment(profile: str, candidate_text: str) -> float:
+    text = (candidate_text or "").lower()
+
+    breakfast_kw = ["cafe", "café", "manhã", "manha", "croissant", "pão", "pao", "cappuccino", "chocolate quente", "lanche"]
+    plush_kw = ["pelucia", "pelúcia", "urso", "ursinho"]
+    flower_kw = ["buquê", "buque", "rosa", "rosas", "flores", "flor"]
+    mug_kw = ["caneca"]
+    frame_kw = ["quadro", "polaroide", "polaroides", "foto", "instax"]
+
+    if profile == "BREAKFAST":
+        if _keyword_in_text(text, breakfast_kw):
+            return 0.45
+        if _keyword_in_text(text, plush_kw + flower_kw):
+            return -0.30
+        return -0.08
+
+    if profile == "FLOWERS":
+        if _keyword_in_text(text, flower_kw):
+            return 0.38
+        if _keyword_in_text(text, breakfast_kw):
+            return -0.15
+        return -0.05
+
+    if profile == "MUG":
+        if _keyword_in_text(text, mug_kw):
+            return 0.34
+        return -0.06
+
+    if profile == "PHOTO_FRAME":
+        if _keyword_in_text(text, frame_kw):
+            return 0.34
+        return -0.06
+
+    if profile == "PLUSH":
+        if _keyword_in_text(text, plush_kw):
+            return 0.34
+        return -0.06
+
+    return 0.0
+
+def _semantic_fallback_score(
+    query_embedding: List[float],
+    product_embedding: List[float],
+    query_text: str,
+    candidate_text: str,
+    profile: str,
+) -> float:
+    semantic = _cosine_similarity(query_embedding, product_embedding)
+    lexical = _token_overlap_score(query_text, candidate_text)
+    profile_alignment = _score_profile_alignment(profile, candidate_text)
+
+    return (semantic * 0.62) + (lexical * 0.28) + profile_alignment
+
 async def _get_embeddings(texts: List[str]) -> List[List[float]]:
     client = openai_client
     if not client:
@@ -1275,7 +1358,7 @@ async def consultarCatalogo(
             
             _safe_print(f"🔑 Termos de busca: {search_terms[:3]}")
 
-            all_rows = []
+            all_rows_by_id: Dict[str, Dict[str, Any]] = {}
             
             # Busca com cada termo
             for search_term in search_terms:
@@ -1296,15 +1379,85 @@ async def consultarCatalogo(
                 
                 rows = await conn.fetch(query, f"%{search_term}%", preco_minimo, preco_maximo, exclude_ids, top_k)
                 for row in rows:
-                    if not any(r['id'] == row['id'] for r in all_rows):
-                        all_rows.append(row)
+                    row_dict = dict(row)
+                    row_id = str(row_dict["id"])
+
+                    if row_id not in all_rows_by_id:
+                        all_rows_by_id[row_id] = row_dict
+                        continue
+
+                    existing = all_rows_by_id[row_id]
+                    existing["relevance_score"] = max(
+                        int(existing.get("relevance_score") or 0),
+                        int(row_dict.get("relevance_score") or 0),
+                    )
+                    existing["is_exact_match"] = bool(existing.get("is_exact_match")) or bool(row_dict.get("is_exact_match"))
+
+            all_rows = list(all_rows_by_id.values())
             
             # Separa exatos de fallback
             exact_matches = [dict(r) for r in all_rows if r['is_exact_match']]
             fallback_matches = [dict(r) for r in all_rows if not r['is_exact_match']]
-            
+
+            exact_matches = sorted(
+                exact_matches,
+                key=lambda r: (
+                    -int(r.get("relevance_score") or 0),
+                    float(r.get("price") or 0),
+                ),
+            )
+
+            missing_slots = max(0, top_k - len(exact_matches))
+
+            if missing_slots > 0 and fallback_matches:
+                profile = _infer_search_profile(termo_normalizado, contexto_limpo)
+                semantic_query_text = f"{termo_normalizado}. {contexto_limpo}".strip()
+
+                query_embedding: List[float] = []
+                try:
+                    query_embedding = await _get_embedding_cached(semantic_query_text)
+                except Exception as emb_error:
+                    _safe_print(f"⚠️ Embedding indisponível na fallback semântica: {emb_error}")
+
+                if query_embedding:
+                    await _ensure_product_embeddings(fallback_matches)
+
+                    scored_fallback: List[Dict[str, Any]] = []
+                    for candidate in fallback_matches:
+                        candidate_id = str(candidate.get("id"))
+                        cached = PRODUCT_EMBEDDINGS.get(candidate_id)
+                        product_embedding = (cached or {}).get("embedding") if cached else None
+                        if not product_embedding:
+                            continue
+
+                        candidate_text = _build_product_text(candidate)
+                        score = _semantic_fallback_score(
+                            query_embedding,
+                            product_embedding,
+                            semantic_query_text,
+                            candidate_text,
+                            profile,
+                        )
+
+                        candidate["semantic_score"] = float(score)
+                        scored_fallback.append(candidate)
+
+                    scored_fallback = sorted(
+                        scored_fallback,
+                        key=lambda r: (
+                            -float(r.get("semantic_score") or -999),
+                            float(r.get("price") or 0),
+                        ),
+                    )
+
+                    strong_scored = [r for r in scored_fallback if float(r.get("semantic_score") or 0.0) >= 0.24]
+                    fallback_matches = (strong_scored or scored_fallback)[:missing_slots]
+                else:
+                    fallback_matches = fallback_matches[:missing_slots]
+            else:
+                fallback_matches = fallback_matches[:missing_slots]
+
             exact_matches = exact_matches[:top_k]
-            fallback_matches = fallback_matches[:max(0, top_k - len(exact_matches))]
             
             _safe_print(f"📦 Encontrados {len(exact_matches)} exatos + {len(fallback_matches)} fallback")
             

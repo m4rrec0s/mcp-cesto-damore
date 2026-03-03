@@ -605,6 +605,8 @@ def _infer_search_profile(termo: str, contexto: str) -> str:
         return "PHOTO_FRAME"
     if _keyword_in_text(combined, ["pelucia", "pelúcia", "urso", "ursinho"]):
         return "PLUSH"
+    if _keyword_in_text(combined, ["criança", "crianca", "infantil", "filho", "filha", "bebê", "bebe", "menino", "menina", "kids"]):
+        return "CHILDREN"
 
     return "GENERIC"
 
@@ -655,6 +657,14 @@ def _score_profile_alignment(profile: str, candidate_text: str) -> float:
         if _keyword_in_text(text, plush_kw):
             return 0.34
         return -0.06
+
+    children_kw = ["criança", "crianca", "infantil", "para_crianças", "kids"]
+    if profile == "CHILDREN":
+        if _keyword_in_text(text, children_kw):
+            return 0.45
+        if _keyword_in_text(text, ["romântic", "romantic", "namorad", "casal", "noiv"]):
+            return -0.30
+        return -0.08
 
     return 0.0
 
@@ -1207,6 +1217,19 @@ def _normalize_product_search_term(termo: str) -> str:
         "quebra-cabeça": "quebra-cabeça",
         "quebra": "quebra-cabeça",
         "puzzle": "quebra-cabeça",
+        
+        "criança": "criança",
+        "crianca": "criança",
+        "crianças": "criança",
+        "criancas": "criança",
+        "infantil": "criança",
+        "kids": "criança",
+        "filho": "criança",
+        "filha": "criança",
+        "bebê": "criança",
+        "bebe": "criança",
+        "menino": "criança",
+        "menina": "criança",
         
         "namorados": "coração",
         "coração": "coração",

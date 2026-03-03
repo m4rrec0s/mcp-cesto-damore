@@ -1369,7 +1369,28 @@ async def consultarCatalogo(
                     variants.append(no_accents)
                 return variants
 
-            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com"}
+            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com",
+                            "que", "quero", "quer", "tem", "ter", "pra", "pro", "meu", "minha", "seu", "sua",
+                            "ele", "ela", "nos", "nosso", "muito", "mais", "como", "ser", "está", "estou",
+                            "esse", "essa", "isso", "aqui", "ali", "bem", "bom", "boa", "vai", "vou",
+                            "sim", "não", "nao", "mas", "ainda", "todo", "toda", "tipo", "gostaria",
+                            "preciso", "busco", "procuro", "algo", "coisa", "opcao", "opção"}
+            
+            context_product_keywords = {
+                "criança", "crianca", "crianças", "criancas", "infantil", "kids",
+                "filho", "filha", "bebê", "bebe", "menino", "menina",
+                "romântico", "romantico", "romântica", "romantica", "namorada", "namorado",
+                "amor", "coração", "coracao", "casal",
+                "aniversário", "aniversario", "birthday",
+                "café", "cafe", "coffee",
+                "chocolate", "chocolates",
+                "flores", "flor", "rosa", "rosas", "buquê", "buque",
+                "pelúcia", "pelucia", "urso", "teddy",
+                "caneca", "canecas", "quadro", "quadros",
+                "bar", "cerveja", "festa",
+                "mãe", "mae", "pai", "esposa", "marido",
+                "express", "rápido", "rapido", "pronta",
+            }
             
             # Constrói lista de termos para buscar
             search_terms = list(dict.fromkeys(get_variants(termo_normalizado)))
@@ -1377,6 +1398,17 @@ async def consultarCatalogo(
                 if w.strip().lower() not in common_words and len(w.strip()) > 2:
                     search_terms.extend(get_variants(w.strip()))
             search_terms.extend(get_variants(termo))
+            
+            # Extrai keywords relevantes do contexto para busca ILIKE
+            contexto_words = re.split(r"[\s,;.!?]+", contexto_limpo.lower())
+            for cw in contexto_words:
+                cw_clean = cw.strip()
+                if cw_clean in context_product_keywords and cw_clean not in common_words:
+                    normalized_cw = _normalize_product_search_term(cw_clean)
+                    search_terms.extend(get_variants(normalized_cw))
+                    if normalized_cw != cw_clean:
+                        search_terms.extend(get_variants(cw_clean))
+            
             search_terms = list(dict.fromkeys([t for t in search_terms if t.strip()]))
             
             _safe_print(f"🔑 Termos de busca: {search_terms[:3]}")
@@ -1980,9 +2012,26 @@ async def get_product_details(product_name: str) -> str:
             
             _safe_print(f"🔍 Buscando produto: '{product_name_clean}'")
             
-            # Busca por correspondência parcial - prioriza exatos primeiro
+            search_variants = [product_name_clean]
+            no_apostrophe = product_name_clean.replace("'", "").replace("\u2019", "")
+            if no_apostrophe != product_name_clean:
+                search_variants.append(no_apostrophe)
+            with_apostrophe = re.sub(r"\bd([aA])", r"d'\1", product_name_clean)
+            if with_apostrophe not in search_variants:
+                search_variants.append(with_apostrophe)
+            no_apostrophe_lower = no_apostrophe.lower()
+            with_apostrophe_lower = re.sub(r"\bd([a])", r"d'\1", no_apostrophe_lower)
+            if with_apostrophe_lower not in search_variants:
+                search_variants.append(with_apostrophe_lower)
+            
+            for word in product_name_clean.split():
+                word_clean = word.strip()
+                if len(word_clean) > 3 and word_clean.lower() not in {"para", "pra", "com", "sem", "uma", "esse", "essa"}:
+                    if word_clean not in search_variants:
+                        search_variants.append(word_clean)
+            
             search_query = """
-            SELECT id, name, description, price, production_time,
+            SELECT id, name, description, price, production_time, image_url,
                    (name ILIKE $1) as is_exact_match
             FROM public."Product"
             WHERE name ILIKE $2 AND is_active = true
@@ -1990,8 +2039,12 @@ async def get_product_details(product_name: str) -> str:
             LIMIT 3;
             """
             
-            # Tenta primeiro uma correspondência exata (nome completo)
-            exact_match = await conn.fetchrow(search_query, product_name_clean, f"{product_name_clean}%")
+            exact_match = None
+            for variant in search_variants:
+                exact_match = await conn.fetchrow(search_query, variant, f"{variant}%")
+                if exact_match:
+                    _safe_print(f"✅ Match exato com variante: '{variant}'")
+                    break
             
             if exact_match:
                 # Se encontrou exato, busca componentes
@@ -2018,6 +2071,7 @@ async def get_product_details(product_name: str) -> str:
                     "nome": exact_match['name'],
                     "preco": float(exact_match['price']),
                     "descricao": exact_match['description'] or "",
+                    "imagem": exact_match.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
                     "production_time": int(exact_match['production_time'] or 0),
                     "componentes": componentes
                 }
@@ -2025,8 +2079,15 @@ async def get_product_details(product_name: str) -> str:
                 _safe_print(f"✅ Produto exato encontrado: {exact_match['name']} ({len(componentes)} componentes)")
                 return json.dumps(structured, ensure_ascii=False)
             
-            # Se não encontrou exato, tenta busca parcial
-            partial_matches = await conn.fetch(search_query, None, f"%{product_name_clean}%")
+            # Se não encontrou exato, tenta busca parcial com variantes
+            all_partial_by_id = {}
+            for variant in search_variants:
+                rows = await conn.fetch(search_query, None, f"%{variant}%")
+                for row in rows:
+                    rid = str(row['id'])
+                    if rid not in all_partial_by_id:
+                        all_partial_by_id[rid] = row
+            partial_matches = list(all_partial_by_id.values())
             
             if not partial_matches:
                 _safe_print(f"❌ Nenhum produto encontrado para: {product_name_clean}")
@@ -2061,6 +2122,7 @@ async def get_product_details(product_name: str) -> str:
                     "nome": product['name'],
                     "preco": float(product['price']),
                     "descricao": product['description'] or "",
+                    "imagem": product.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
                     "production_time": int(product['production_time'] or 0),
                     "componentes": componentes
                 }
@@ -2076,7 +2138,8 @@ async def get_product_details(product_name: str) -> str:
                     "id": str(p['id']),
                     "nome": p['name'],
                     "preco": float(p['price']),
-                    "descricao": p['description'] or ""
+                    "descricao": p['description'] or "",
+                    "imagem": p.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp"
                 }
                 for p in partial_matches[:3]
             ]

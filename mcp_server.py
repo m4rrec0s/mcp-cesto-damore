@@ -2057,12 +2057,30 @@ async def get_product_details(product_name: str) -> str:
                 """
                 component_rows = await conn.fetch(components_query, exact_match['id'])
                 
+                # Busca adicionais permitidos para este produto
+                additionals_query = """
+                SELECT i.name, pa.custom_price as price
+                FROM public."ProductAdditional" pa
+                JOIN public."Item" i ON pa.additional_id = i.id
+                WHERE pa.product_id = $1 AND pa.is_active = true
+                ORDER BY i.name ASC;
+                """
+                additional_rows = await conn.fetch(additionals_query, exact_match['id'])
+                
                 componentes = [
                     {
                         "nome": r['name'],
                         "quantidade": r['quantity']
                     }
                     for r in component_rows
+                ]
+                
+                adicionais = [
+                    {
+                        "nome": r['name'],
+                        "preco": float(r['price']) if r['price'] is not None else 0.0
+                    }
+                    for r in additional_rows
                 ]
                 
                 structured = {
@@ -2073,10 +2091,11 @@ async def get_product_details(product_name: str) -> str:
                     "descricao": exact_match['description'] or "",
                     "imagem": exact_match.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
                     "production_time": int(exact_match['production_time'] or 0),
-                    "componentes": componentes
+                    "componentes": componentes,
+                    "adicionais_disponiveis": adicionais
                 }
                 
-                _safe_print(f"✅ Produto exato encontrado: {exact_match['name']} ({len(componentes)} componentes)")
+                _safe_print(f"✅ Produto exato encontrado: {exact_match['name']} ({len(componentes)} componentes, {len(adicionais)} adicionais)")
                 return json.dumps(structured, ensure_ascii=False)
             
             # Se não encontrou exato, tenta busca parcial com variantes
@@ -2108,12 +2127,30 @@ async def get_product_details(product_name: str) -> str:
                 """
                 component_rows = await conn.fetch(components_query, product['id'])
                 
+                # Busca adicionais permitidos para este produto
+                additionals_query = """
+                SELECT i.name, pa.custom_price as price
+                FROM public."ProductAdditional" pa
+                JOIN public."Item" i ON pa.additional_id = i.id
+                WHERE pa.product_id = $1 AND pa.is_active = true
+                ORDER BY i.name ASC;
+                """
+                additional_rows = await conn.fetch(additionals_query, product['id'])
+                
                 componentes = [
                     {
                         "nome": r['name'],
                         "quantidade": r['quantity']
                     }
                     for r in component_rows
+                ]
+                
+                adicionais = [
+                    {
+                        "nome": r['name'],
+                        "preco": float(r['price']) if r['price'] is not None else 0.0
+                    }
+                    for r in additional_rows
                 ]
                 
                 structured = {
@@ -2124,10 +2161,11 @@ async def get_product_details(product_name: str) -> str:
                     "descricao": product['description'] or "",
                     "imagem": product.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
                     "production_time": int(product['production_time'] or 0),
-                    "componentes": componentes
+                    "componentes": componentes,
+                    "adicionais_disponiveis": adicionais
                 }
                 
-                _safe_print(f"✅ Produto parcial encontrado: {product['name']} ({len(componentes)} componentes)")
+                _safe_print(f"✅ Produto parcial encontrado: {product['name']} ({len(componentes)} componentes, {len(adicionais)} adicionais)")
                 return json.dumps(structured, ensure_ascii=False)
             
             # Se houver múltiplas correspondências, lista as opções

@@ -1666,6 +1666,8 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
     - Cliente menciona uma data mas ainda não escolheu nenhum produto.
 
     NÃO USE QUANDO:
+    - Cliente pergunta sobre LOCAL de entrega ("entrega em X?", "faz entrega para tal lugar?").
+      → Nesse caso use OBRIGATORIAMENTE `calculate_freight`.
     - Cliente já escolheu um produto específico e quer saber se dá pra entregar naquele horário.
       → Nesse caso use `can_produce_in_time` (verifica produção + entrega do produto escolhido).
 

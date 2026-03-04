@@ -1947,7 +1947,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         "available_hours_total": hours_fmt,
                         "available_from_ready_time": available_fmt,
                         "suggested_slots": suggested_slots,
-                        "ai_instruction": "APRESENTE TODOS os suggested_slots ao cliente e PERGUNTE qual ele prefere. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
+                        "ai_instruction": "[INFORMAÇÃO INTERNA] APRESENTE TODOS os suggested_slots ao cliente e PERGUNTE qual ele prefere. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
                     },
                     f"Tem como entregar hoje ainda! Com produção de {prod_hours}h comerciais, fica pronta por volta das {ready_time_formatted}! 🎁\n\n**Opções de entrega para hoje:**\n{suggested_str}\n\nQual desses horários você prefere? 🌹"
                 )
@@ -1963,7 +1963,7 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                 "production_time_hours": prod_hours,
                 "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
                 "estimated_ready_time": ready_time_val.strftime("%H:%M"),
-                "ai_instruction": "PERGUNTE ao cliente qual horario ele prefere dentro de available_hours. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
+                "ai_instruction": "[INFORMAÇÃO INTERNA] PERGUNTE ao cliente qual horario ele prefere dentro de available_hours. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
             }
             
             if ready_date > date_obj:
@@ -2501,7 +2501,7 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
     if session_id:
         await _internal_block_session(session_id)
 
-    return "Transferência realizada com sucesso. Atendente humano notificado. ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA avisar o cliente que ele foi transferido e informar OBRIGATORIAMENTE na sua reposta final o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
+    return "Transferência realizada com sucesso. Atendente humano notificado. ✅\n\n[INFORMAÇÃO INTERNA] Você DEVE AGORA avisar o cliente de forma meiga que ele foi transferido e informar OBRIGATORIAMENTE na sua resposta final o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
 
 
 @mcp.tool()
@@ -2560,7 +2560,7 @@ Horário de Atendimento: Seg-Sex 08:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
 
     return _format_structured_response(
         {"status": "success", "action": "checkout_finalized", "session_blocked": bool(session_id)},
-        "Pedido finalizado e equipe notificada com sucesso! ✅\n\n⚠️ IMPORTANTE: Você DEVE AGORA enviar ao cliente OBRIGATORIAMENTE a mensagem final com o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
+        "Pedido finalizado e equipe notificada com sucesso! ✅\n\n[INFORMAÇÃO INTERNA] Você DEVE AGORA enviar ao cliente de forma meiga a mensagem final de agradecimento e informar OBRIGATORIAMENTE o horário de atendimento comercial exato:\nSeg-Sex 08:30-12:00 | 14:00-17:00\nSábado 08:00-11:00"
     )
 
 @mcp.tool()

@@ -2280,45 +2280,19 @@ async def can_produce_in_time(product_name: str, delivery_date: str, delivery_ti
             
             # Se é hoje, valida se pode começar a partir de agora
             if delivery_date_obj == now_local.date():
-                # Verifica se estamos dentro do horário comercial
-                day_key = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"][now_local.date().weekday()]
-                business_hours = BUSINESS_HOURS.get(day_key, [])
-                
-                # Encontra em qual bloco estamos agora
-                current_block_start = None
-                current_block_end = None
-                
-                for block_start, block_end in business_hours:
-                    if block_start <= now_local.time() <= block_end:
-                        current_block_start = block_start
-                        current_block_end = block_end
-                        break
-                
-                # Se não estamos em horário comercial, começa do próximo bloco
-                if current_block_start is None:
-                    # Procura o próximo bloco de hoje
-                    for block_start, block_end in business_hours:
-                        if block_start > now_local.time():
-                            current_block_start = block_start
-                            current_block_end = block_end
-                            break
-                    
-                    # Se não houver próximo bloco hoje, começa de amanhã
-                    if current_block_start is None:
-                        start_calculation_date = now_local.date() + timedelta(days=1)
-                        start_calculation_time = time(0, 0)
-                    else:
-                        start_calculation_date = now_local.date()
-                        start_calculation_time = current_block_start
-                else:
-                    start_calculation_date = now_local.date()
-                    start_calculation_time = now_local.time()
+                start_calculation_date = now_local.date()
+                start_calculation_time = now_local.time()
+            elif delivery_date_obj > now_local.date():
+                # Data é futura, começa do primeiro horário comercial de HOJE (se ainda houver)
+                # ou do próximo dia útil, acumulando tempo.
+                start_calculation_date = now_local.date()
+                start_calculation_time = now_local.time()
             else:
-                # Data é futura, começa do primeiro horário comercial daquele dia
-                start_calculation_date = delivery_date_obj
-                start_calculation_time = time(0, 0)
+                # Data informada é anterior a hoje (já validado acima, mas por segurança)
+                start_calculation_date = now_local.date()
+                start_calculation_time = now_local.time()
             
-            # Calcula quando o produto ficará pronto
+            # Calcula quando o produto ficará pronto (anda pelos horários comerciais a partir de AGORA)
             ready_date, ready_time = _calculate_ready_datetime(
                 datetime.combine(start_calculation_date, start_calculation_time),
                 production_hours,

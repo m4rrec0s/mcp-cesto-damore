@@ -1338,6 +1338,10 @@ async def consultarCatalogo(
             price_source = f"{termo_normalizado} {contexto_limpo}".strip()
             ctx_min, ctx_max = _extract_price_bounds(price_source)
 
+            budget_present_in_input = (preco_minimo is not None) or (preco_maximo is not None)
+            budget_present_in_context = (ctx_min is not None) or (ctx_max is not None)
+            prefer_high_price = not (budget_present_in_input or budget_present_in_context)
+
             if preco_minimo is None:
                 preco_minimo = ctx_min if ctx_min is not None else 0.0
             if preco_maximo is None:
@@ -1454,13 +1458,39 @@ async def consultarCatalogo(
             exact_matches = [dict(r) for r in all_rows if r['is_exact_match']]
             fallback_matches = [dict(r) for r in all_rows if not r['is_exact_match']]
 
-            exact_matches = sorted(
-                exact_matches,
-                key=lambda r: (
-                    -int(r.get("relevance_score") or 0),
-                    -float(r.get("price") or 0),
-                ),
-            )
+            requested_keywords = set()
+            for tk in (termo_normalizado or "").split():
+                if len(tk) >= 3:
+                    requested_keywords.add(tk)
+
+            def _priority_boost(row: Dict[str, Any]) -> float:
+                """Prioriza pronta-entrega, itens especiais e garante que o termo pedido (caneca/pelúcia/quadro etc.) pese."""
+                desc = ((row.get("description") or "") + " " + (row.get("name") or "")).lower()
+                ready_keywords = ["pronta", "pronta_entrega", "pronto", "hoje", "agora", "express"]
+                special_keywords = ["polaroid", "foto", "fotos", "pelúcia", "pelucia", "urso", "teddy", "quadro", "caneca"]
+                ready_bonus = 0
+                if any(k in desc for k in ready_keywords):
+                    ready_bonus += 40
+                prod_time = row.get("production_time")
+                try:
+                    if prod_time is not None and float(prod_time) <= 1:
+                        ready_bonus += 25
+                except Exception:
+                    pass
+                special_bonus = 30 if any(k in desc for k in special_keywords) else 0
+                requested_bonus = 0
+                if requested_keywords and any(k in desc for k in requested_keywords):
+                    requested_bonus += 50  # garante que o termo pedido pese mais do que pronta-entrega isoladamente
+                return ready_bonus + special_bonus + requested_bonus
+
+            def _sort_key_exact(row: Dict[str, Any]):
+                rel = int(row.get("relevance_score") or 0)
+                price = float(row.get("price") or 0)
+                boost = _priority_boost(row)
+                price_pref = price if prefer_high_price else 0
+                return (-boost, -price_pref, -rel, -price)
+
+            exact_matches = sorted(exact_matches, key=_sort_key_exact)
 
             missing_slots = max(0, top_k - len(exact_matches))
 
@@ -1501,6 +1531,8 @@ async def consultarCatalogo(
                         scored_fallback,
                         key=lambda r: (
                             -float(r.get("semantic_score") or -999),
+                            -_priority_boost(r),
+                            -float(r.get("price") or 0) if prefer_high_price else 0,
                             -float(r.get("price") or 0),
                         ),
                     )

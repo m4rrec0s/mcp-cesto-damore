@@ -1459,13 +1459,15 @@ async def consultarCatalogo(
             fallback_matches = [dict(r) for r in all_rows if not r['is_exact_match']]
 
             requested_keywords = set()
+            generic_terms = {"cesta", "cesto", "presente", "presenca", "gift"}
             for tk in (termo_normalizado or "").split():
-                if len(tk) >= 3:
+                if len(tk) >= 4 and tk not in generic_terms:
                     requested_keywords.add(tk)
 
             def _priority_boost(row: Dict[str, Any]) -> float:
-                """Prioriza pronta-entrega, itens especiais e garante que o termo pedido (caneca/pelúcia/quadro etc.) pese."""
+                """Prioriza pronta-entrega, itens especiais e garante que o termo pedido pese (ex.: caneca/pelúcia/quadro/aniversario)."""
                 desc = ((row.get("description") or "") + " " + (row.get("name") or "")).lower()
+                normalized_name = _normalize_embedding_text(row.get("name") or "")
                 ready_keywords = ["pronta", "pronta_entrega", "pronto", "hoje", "agora", "express"]
                 special_keywords = ["polaroid", "foto", "fotos", "pelúcia", "pelucia", "urso", "teddy", "quadro", "caneca"]
                 ready_bonus = 0
@@ -1480,8 +1482,11 @@ async def consultarCatalogo(
                 special_bonus = 30 if any(k in desc for k in special_keywords) else 0
                 requested_bonus = 0
                 if requested_keywords and any(k in desc for k in requested_keywords):
-                    requested_bonus += 50  # garante que o termo pedido pese mais do que pronta-entrega isoladamente
-                return ready_bonus + special_bonus + requested_bonus
+                    requested_bonus += 60  # termo pedido pesa bastante
+                name_match_bonus = 0
+                if requested_keywords and any(k in normalized_name for k in requested_keywords):
+                    name_match_bonus += 80  # nome compatível domina o ranking
+                return ready_bonus + special_bonus + requested_bonus + name_match_bonus
 
             def _sort_key_exact(row: Dict[str, Any]):
                 rel = int(row.get("relevance_score") or 0)

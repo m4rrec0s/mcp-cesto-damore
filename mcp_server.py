@@ -1485,15 +1485,19 @@ async def consultarCatalogo(
                     requested_bonus += 60  # termo pedido pesa bastante
                 name_match_bonus = 0
                 if requested_keywords and any(k in normalized_name for k in requested_keywords):
-                    name_match_bonus += 80  # nome compatível domina o ranking
+                    name_match_bonus += 120  # nome compatível domina o ranking
+                if "aniver" in normalized_name and any("aniver" in k for k in requested_keywords):
+                    name_match_bonus += 50  # reforço específico para aniversário
                 return ready_bonus + special_bonus + requested_bonus + name_match_bonus
 
             def _sort_key_exact(row: Dict[str, Any]):
                 rel = int(row.get("relevance_score") or 0)
                 price = float(row.get("price") or 0)
                 boost = _priority_boost(row)
+                normalized_name = _normalize_embedding_text(row.get("name") or "")
+                name_match = 1 if (requested_keywords and any(k in normalized_name for k in requested_keywords)) else 0
                 price_pref = price if prefer_high_price else 0
-                return (-boost, -price_pref, -rel, -price)
+                return (-name_match, -boost, -price_pref, -rel, -price)
 
             exact_matches = sorted(exact_matches, key=_sort_key_exact)
 
@@ -1532,10 +1536,15 @@ async def consultarCatalogo(
                         candidate["semantic_score"] = float(score)
                         scored_fallback.append(candidate)
 
+                    def _fb_name_match(row: Dict[str, Any]):
+                        normalized_name = _normalize_embedding_text(row.get("name") or "")
+                        return 1 if (requested_keywords and any(k in normalized_name for k in requested_keywords)) else 0
+
                     scored_fallback = sorted(
                         scored_fallback,
                         key=lambda r: (
                             -float(r.get("semantic_score") or -999),
+                            -_fb_name_match(r),
                             -_priority_boost(r),
                             -float(r.get("price") or 0) if prefer_high_price else 0,
                             -float(r.get("price") or 0),

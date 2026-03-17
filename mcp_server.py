@@ -669,10 +669,77 @@ async def change_flow_node(node_id: str, reason: str, customer_phone: Optional[s
     Retorna:
          Instrução para a engine salvar que o node_id mudou. A engine backend intercepta esta string no caso de fallback.
     """
-    _safe_print(f"🔄 Redirecionando fluxo: {customer_phone or 'Cliente'} ➝ NO: {node_id} (Motivo: {reason})")
-    
-    # Esta string é interpretada pelo backend para persistir o node_id na sessao do BotFlow.
-    return f"SUCESSO: Fluxo redirecionado para node_id {node_id}\nSUCESSO_REDIRECIONAMENTO_DE_NO:[{node_id}]"
+    requested_node_id = (node_id or "").strip()
+    _safe_print(f"🔄 Redirecionando fluxo: {customer_phone or 'Cliente'} ➝ NO: {requested_node_id} (Motivo: {reason})")
+
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT nodes, edges FROM public."BotFlow" WHERE is_active = true LIMIT 1')
+            if not row:
+                return "Erro: Nenhum fluxo ativo foi encontrado para redirecionamento."
+
+            nodes_data = row.get("nodes")
+            edges_data = row.get("edges")
+
+            nodes = json.loads(nodes_data) if isinstance(nodes_data, str) else (nodes_data or [])
+            edges = json.loads(edges_data) if isinstance(edges_data, str) else (edges_data or [])
+
+            nodes_by_id = {
+                str(n.get("id")): n for n in nodes
+                if isinstance(n, dict) and n.get("id")
+            }
+
+            resolved_node_id = requested_node_id if requested_node_id in nodes_by_id else None
+
+            if not resolved_node_id:
+                normalized_requested = _normalize_embedding_text(requested_node_id)
+                normalized_reason = _normalize_embedding_text(reason or "")
+                combined = f"{normalized_requested} {normalized_reason}".strip()
+
+                asks_for_start = any(
+                    token in combined
+                    for token in ["menu principal", "inicio", "inicial", "primeiro menu", "primeiro", "comeco", "comeco", "start"]
+                )
+
+                if asks_for_start:
+                    start_node = next(
+                        (n for n in nodes if isinstance(n, dict) and n.get("type") == "startNode"),
+                        None,
+                    )
+                    if start_node:
+                        start_id = str(start_node.get("id"))
+                        first_edge = next(
+                            (e for e in edges if isinstance(e, dict) and str(e.get("source")) == start_id),
+                            None,
+                        )
+                        if first_edge and first_edge.get("target"):
+                            target_id = str(first_edge.get("target"))
+                            if target_id in nodes_by_id:
+                                resolved_node_id = target_id
+                        if not resolved_node_id and start_id in nodes_by_id:
+                            resolved_node_id = start_id
+
+            if not resolved_node_id:
+                menu_candidates = []
+                for n in nodes:
+                    if not isinstance(n, dict) or n.get("type") != "menuNode":
+                        continue
+                    nid = str(n.get("id"))
+                    data = n.get("data", {}) or {}
+                    title = data.get("label") or data.get("message") or data.get("name") or "Menu"
+                    menu_candidates.append(f"- {nid}: {str(title)[:80]}")
+
+                hint = "\n".join(menu_candidates[:5]) if menu_candidates else "- nenhum menu encontrado"
+                return (
+                    f"ERRO_NODE_ID_INVALIDO: '{requested_node_id}'. "
+                    "Use list_available_menus e escolha um node_id existente.\n"
+                    f"Sugestões:\n{hint}"
+                )
+
+            return f"SUCESSO: Fluxo redirecionado para node_id {resolved_node_id}\nSUCESSO_REDIRECIONAMENTO_DE_NO:[{resolved_node_id}]"
+    except Exception as e:
+        return f"Erro ao redirecionar fluxo: {str(e)}"
 
 @mcp.tool()
 async def route_to_flow_node(target_node_id: str, reason: str, customer_phone: Optional[str] = None) -> str:

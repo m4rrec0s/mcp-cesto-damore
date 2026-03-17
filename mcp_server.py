@@ -610,6 +610,75 @@ def _infer_search_profile(termo: str, contexto: str) -> str:
 
     return "GENERIC"
 
+@mcp.tool()
+async def list_available_menus() -> str:
+    """
+    Restaura a lista de menus dinâmicos configurados no banco de dados.
+    Você precisa desta lista para saber os IDs (node_id) exatos de cada menu para onde você pode rotear o cliente, caso ele queira "ver opções", "voltar", etc.
+    Sempre chame esta tool primeiro caso nao saiba qual node_id usar em change_flow_node.
+    """
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT nodes FROM public."BotFlow" WHERE is_active = true LIMIT 1')
+            if not row or not row.get("nodes"):
+                return "Erro: Nenhum fluxo ativo foi encontrado no banco de dados."
+            
+            nodes_data = row["nodes"]
+            if isinstance(nodes_data, str):
+                nodes = json.loads(nodes_data)
+            else:
+                nodes = nodes_data
+                
+            available_menus = []
+            for node in nodes:
+                if isinstance(node, dict) and node.get("type") == "menuNode":
+                    node_id = node.get("id")
+                    data = node.get("data", {})
+                    label = data.get("label") or data.get("message") or data.get("name") or "Menu Desconhecido"
+                    options = data.get("options", [])
+                    options_str = ""
+                    if options:
+                        options_list = [opt if isinstance(opt, str) else opt.get("label", opt.get("value", "")) for opt in options]
+                        options_str = ", ".join(options_list)
+                    
+                    available_menus.append(f"- ID: '{node_id}' | Titulo: '{str(label)[:100]}' | Opcoes: [{options_str}]")
+            
+            if not available_menus:
+                return "Nenhum menu foi encontrado no fluxo atual."
+            
+            result = "Menus disponiveis no fluxo ativo (memorize este ID para a tool change_flow_node):\n" + "\n".join(available_menus)
+            return result
+    except Exception as e:
+        return f"Erro ao buscar menus: {str(e)}"
+
+@mcp.tool()
+async def change_flow_node(node_id: str, reason: str, customer_phone: Optional[str] = None) -> str:
+    """
+    Roteia o cliente para um nó de atendimento específico do fluxo principal.
+    
+    USE QUANDO:
+    - O cliente pedir para "ver opções", "botar pro início", "voltar", "ver catálogo".
+    - A intenção do cliente for melhor atendida por um menu do que por texto.
+    
+    Args:
+        node_id: O ID do nó exato (obtido em list_available_menus) para onde enviar o cliente. Exemplo: "1234-abcd-..."
+        reason: Motivo para alterar o fluxo (ex: "cliente pediu para voltar ao inicio").
+        customer_phone: Telefone do cliente (opcional).
+        
+    Retorna:
+         Instrução para a engine salvar que o node_id mudou. A engine backend intercepta esta string no caso de fallback.
+    """
+    _safe_print(f"🔄 Redirecionando fluxo: {customer_phone or 'Cliente'} ➝ NO: {node_id} (Motivo: {reason})")
+    
+    # Esta string é interpretada pelo backend para persistir o node_id na sessao do BotFlow.
+    return f"SUCESSO: Fluxo redirecionado para node_id {node_id}\nSUCESSO_REDIRECIONAMENTO_DE_NO:[{node_id}]"
+
+@mcp.tool()
+async def route_to_flow_node(target_node_id: str, reason: str, customer_phone: Optional[str] = None) -> str:
+    """Compatibilidade retroativa. Prefira change_flow_node em novas integrações."""
+    return await change_flow_node(target_node_id, reason, customer_phone)
+
 def _token_overlap_score(query_text: str, candidate_text: str) -> float:
     query_tokens = set(_tokenize_context(query_text))
     candidate_tokens = set(_tokenize_context(candidate_text))

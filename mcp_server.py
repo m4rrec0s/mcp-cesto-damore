@@ -2011,19 +2011,16 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                                 "status": "unavailable", 
                                 "reason": "insufficient_production_time", 
                                 "current_time": now_local.strftime("%H:%M"),
-                                "production_time_hours": prod_hours,
-                                "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
-                                "estimated_ready_time": ready_time_val.strftime("%H:%M"),
                                 "requested_time": requested_time.strftime("%H:%M"),
                                 "next_available_date": next_date.strftime("%Y-%m-%d"),
                                 "next_available_hours": next_hours_fmt
                             },
-                            f"⏱️ Poxa, o prazo ficou apertado! Agora são {now_local.strftime('%H:%M')} e precisamos de {prod_hours}h comerciais para preparar (ficaria pronta {ready_info}).\n\nO horário que você pediu ({requested_time.strftime('%H:%M')}) não é viável.\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
+                            f"⏰ O horário que você pediu ({requested_time.strftime('%H:%M')}) não está disponível.\n\nHorários para {day_name} ({date_obj.strftime('%d/%m')}): {hours_fmt}.\n\nQue tal marcar para {next_day_name} ({next_date.strftime('%d/%m')})? Atendemos das {next_hours_fmt}. 🌹"
                         )
                 
                 return _format_structured_response(
-                    {"status": "available", "date": date_str, "time": time_str, "production_time_hours": production_time_hours or 1},
-                    f"✅ Perfeito! Tá marcado para {day_name} às {time_str}! Sua cesta vai estar prontinha após {production_time_hours or 1}h comerciais de produção. 🌹❤️"
+                    {"status": "available", "date": date_str, "time": time_str},
+                    f"✅ Perfeito! Horários disponíveis para {day_name} ({date_obj.strftime('%d/%m')}): {hours_fmt}. 🌹❤️"
                 )
             
             except ValueError:
@@ -2126,36 +2123,33 @@ async def validate_delivery_availability(date_str: str, time_str: Optional[str] 
                         "status": "available", 
                         "today": True, 
                         "current_time_campina": now_local.strftime("%H:%M"),
-                        "production_time_hours": prod_hours,
-                        "estimated_ready_time": ready_time_formatted,
                         "available_hours_total": hours_fmt,
                         "available_from_ready_time": available_fmt,
                         "suggested_slots": suggested_slots,
-                        "ai_instruction": "[INFORMAÇÃO INTERNA] APRESENTE TODOS os suggested_slots ao cliente e PERGUNTE qual ele prefere. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
                     },
-                    f"Tem como entregar hoje ainda! Com produção de {prod_hours}h comerciais, fica pronta por volta das {ready_time_formatted}! 🎁\n\n**Opções de entrega para hoje:**\n{suggested_str}\n\nQual desses horários você prefere? 🌹"
+                    f"✅ Horários disponíveis para hoje ({date_obj.strftime('%d/%m')}):\n{suggested_str}"
                 )
             
             # Future date
-            prod_hours = production_time_hours or 1
-            ready_date, ready_time_val = _calculate_ready_datetime(now_local, prod_hours, BUSINESS_HOURS)
+            suggested_slots = []
+            for s, e in business_hours:
+                temp_dt = datetime.combine(date_obj, s)
+                end_dt = datetime.combine(date_obj, e)
+                while temp_dt <= end_dt:
+                    suggested_slots.append(temp_dt.time().strftime("%H:%M"))
+                    temp_dt += timedelta(minutes=30)
+
             response_data = {
                 "status": "available", 
                 "date": date_str, 
                 "available_hours": hours_fmt,
                 "current_time_campina": now_local.strftime("%H:%M"),
-                "production_time_hours": prod_hours,
-                "estimated_ready_date": ready_date.strftime("%Y-%m-%d"),
-                "estimated_ready_time": ready_time_val.strftime("%H:%M"),
-                "ai_instruction": "[INFORMAÇÃO INTERNA] PERGUNTE ao cliente qual horario ele prefere dentro de available_hours. NAO escolha por ele. estimated_ready_time e tempo de producao, NAO e o horario de entrega."
+                "suggested_slots": suggested_slots,
             }
-            
-            if ready_date > date_obj:
-                response_data["warning"] = f"Produção de {prod_hours}h pode não ficar pronta antes de {date_str}"
             
             return _format_structured_response(
                 response_data,
-                f"✅ {day_name.capitalize()} ({date_obj.strftime('%d/%m')}) é perfeitinho! Atendemos das {hours_fmt}.\n\nQual horário você prefere? 🎁"
+                f"✅ Horários disponíveis para {day_name.capitalize()} ({date_obj.strftime('%d/%m')}): {hours_fmt}. 🎁"
             )
     
     except ValueError as e:

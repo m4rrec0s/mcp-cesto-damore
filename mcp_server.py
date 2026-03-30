@@ -2558,18 +2558,19 @@ async def get_active_holidays() -> str:
         SELECT name, start_date, end_date, closure_type, duration_hours
         FROM public."Holiday"
         WHERE is_active = true
-        AND start_date >= $1::DATE - INTERVAL '1 day'
+        AND start_date <= $1::DATE
+        AND end_date >= $1::DATE
         ORDER BY start_date ASC;
         """
         rows = await conn.fetch(query, now_local.date())
         if not rows:
             return _format_structured_response(
                 {"status": "no_holidays"},
-                "Nenhum feriado ou encerramento programado no momento."
+                "Nenhum feriado ativo para hoje."
             )
         
         holidays = []
-        humanized = "🗓️ *Datas com loja fechada:*\n\n"
+        humanized = "⚠️ *Loja fechada hoje:*\n\n"
         
         for row in rows:
             start = row['start_date']
@@ -2594,7 +2595,7 @@ async def get_active_holidays() -> str:
                 hours = row['duration_hours'] or 0
                 humanized += f"• {name}: {start.strftime('%d/%m/%Y')} - Fechado por {hours}h\n"
         
-        humanized += "\n⚠️ Nessas datas não fazemos entrega ou processamento."
+        humanized += "\n⚠️ Hoje não fazemos entrega ou processamento."
         
         return _format_structured_response(
             {"status": "found", "holidays": holidays},

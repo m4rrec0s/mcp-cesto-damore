@@ -2603,7 +2603,7 @@ async def get_active_holidays() -> str:
         )
 
 @mcp.tool()
-async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
+async def calculate_freight(city: str, payment_method: Optional[str] = None) -> str:
     """Calcula frete. Campina Grande=Grátis(PIX) ou R$10(Cartão). Outras=Até 20km."""
     if not city or str(city).strip() == "":
         return _format_structured_response(
@@ -2612,10 +2612,16 @@ async def calculate_freight(city: str, payment_method: str = "PIX") -> str:
         )
 
     city_lower = str(city).lower().strip()
-    method_lower = str(payment_method).lower().strip() if payment_method else "pix"
+    method_lower = str(payment_method).lower().strip() if payment_method else ""
     is_card = any(k in method_lower for k in ['cart', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito'])
+    has_method = bool(method_lower)
 
     if re.search(r"\bcampina\b", city_lower) or "campina grande" in city_lower:
+        if not has_method:
+            return _format_structured_response(
+                {"status": "needs_payment_method", "city": city},
+                "Para Campina Grande, o frete fica **grátis no PIX** e **R$ 10,00 no Cartão** 🚚. Você prefere pagar por PIX ou Cartão?"
+            )
         if not is_card:
             return "Sim! Entrega para Campina Grande é gratuita no PIX. Entregamos também em outras cidades até 20 km. Os detalhes de frete serão passados ao fim do atendimento 😊"
         else:
@@ -2696,7 +2702,18 @@ async def notify_human_support(reason: str, customer_context: str, customer_name
 
 
 @mcp.tool()
-async def finalize_checkout(customer_context: str, customer_name: str = "Cliente", customer_phone: str = "", session_id: Optional[str] = None) -> str:
+async def finalize_checkout(
+    customer_context: str,
+    customer_name: str = "Cliente",
+    customer_phone: str = "",
+    session_id: Optional[str] = None,
+    product_name: Optional[str] = None,
+    product_price: Optional[str] = None,
+    delivery_date: Optional[str] = None,
+    delivery_time: Optional[str] = None,
+    delivery_address: Optional[str] = None,
+    payment_method: Optional[str] = None,
+) -> str:
     """
     Finaliza pedido APÓS coleta completa dos dados. USO OBRIGATÓRIO no fim do checkout.
 
@@ -2709,19 +2726,60 @@ async def finalize_checkout(customer_context: str, customer_name: str = "Cliente
     Se faltar algum dado, retorna erro com instruções de coleta.
     Após sucesso, bloqueia a sessão automaticamente.
     """
-    ctx = (customer_context or "").lower()
+    customer_context = (customer_context or "").strip()
+    ctx = customer_context.lower()
     is_retirada = "retirada" in ctx or "retirar" in ctx
 
-    has_product = bool(re.search(r"(cesta|produto|buqu[eê]|buque|caneca|rosa|quadro|chocolate|bar|pelúcia|pelucia|flor|cone|quebra)", ctx))
-    has_delivery = bool(re.search(r"(entrega|data|hoje|amanh[aã]|\d{1,2}\/\d{1,2}|\d{4}-\d{2}-\d{2})", ctx))
-    has_address = is_retirada or bool(re.search(r"(rua|avenida|av\.|r\.|endereço|endereco|bairro)", ctx))
-    has_payment = bool(re.search(r"(pix|cart[aã]o|cartao|crédito|credito|débito|debito)", ctx))
+    product_name_ctx = (
+        product_name
+        or (re.search(r"produto\s*[:\-]\s*([^\n]+)", customer_context, re.IGNORECASE) or [None, None])[1]
+        or (re.search(r"(cesta|produto|buqu[eê]|buque|caneca|rosa|quadro|chocolate|bar|pelúcia|pelucia|flor|cone|quebra)[^\n]{0,80}", customer_context, re.IGNORECASE) or [None, None])[0]
+    )
+    product_name_ctx = product_name_ctx.strip() if isinstance(product_name_ctx, str) else ""
+
+    price_match_ctx = re.search(r"r\$\s*\d{1,4}[.,]\d{2}", customer_context, re.IGNORECASE)
+    product_price_ctx = (product_price or (price_match_ctx.group(0) if price_match_ctx else "")).strip()
+
+    date_match_ctx = re.search(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{4})?|hoje|amanh[aã])\b", ctx)
+    delivery_date_ctx = (delivery_date or (date_match_ctx.group(1) if date_match_ctx else "")).strip()
+
+    time_match_ctx = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", customer_context)
+    delivery_time_ctx = (delivery_time or (time_match_ctx.group(0) if time_match_ctx else "")).strip()
+
+    address_match_ctx = re.search(
+        r"endere[cç]o\s*[:\-]\s*([^\n]+)|((?:rua|avenida|av\.|r\.)[^\n]+)|((?:bairro|cidade)\s*[:\-]\s*[^\n]+)",
+        customer_context,
+        re.IGNORECASE,
+    )
+    delivery_address_ctx = (
+        delivery_address
+        or (address_match_ctx.group(1) if address_match_ctx and address_match_ctx.group(1) else "")
+        or (address_match_ctx.group(2) if address_match_ctx and address_match_ctx.group(2) else "")
+        or (address_match_ctx.group(3) if address_match_ctx and address_match_ctx.group(3) else "")
+    ).strip()
+
+    payment_raw = (payment_method or "").strip().lower()
+    if not payment_raw:
+        payment_match_ctx = re.search(r"\b(pix|cart[aã]o|cartao|crédito|credito|débito|debito)\b", ctx)
+        payment_raw = payment_match_ctx.group(1).lower() if payment_match_ctx else ""
+    payment_normalized = "CARTAO" if re.search(r"cart|credito|crédito|debito|débito", payment_raw) else ("PIX" if "pix" in payment_raw else "")
+
+    has_product_name = bool(product_name_ctx)
+    has_product_price = bool(product_price_ctx)
+    has_date = bool(delivery_date_ctx)
+    has_time = bool(delivery_time_ctx)
+    has_address = is_retirada or bool(delivery_address_ctx)
+    has_payment = bool(payment_normalized)
 
     missing = []
-    if not has_product:
-        missing.append("produto (nome e preço)")
-    if not has_delivery:
-        missing.append("data/horário de entrega")
+    if not has_product_name:
+        missing.append("produto (nome)")
+    if not has_product_price:
+        missing.append("produto (preço)")
+    if not has_date:
+        missing.append("data de entrega")
+    if not has_time:
+        missing.append("horário de entrega")
     if not has_address:
         missing.append("endereço completo")
     if not has_payment:
@@ -2729,12 +2787,29 @@ async def finalize_checkout(customer_context: str, customer_name: str = "Cliente
 
     if missing:
         return _format_structured_response(
-            {"status": "error", "error": "incomplete_checkout", "missing": missing},
+            {
+                "status": "error",
+                "error": "incomplete_checkout",
+                "missing": missing,
+                "field_status": {
+                    "product_name": has_product_name,
+                    "product_price": has_product_price,
+                    "delivery_date": has_date,
+                    "delivery_time": has_time,
+                    "delivery_address": has_address,
+                    "payment_method": has_payment,
+                },
+            },
             f"⚠️ Checkout incompleto. Faltam: {', '.join(missing)}.\n\nColeta obrigatória:\n1. Produto (nome + preço)\n2. Data e Horário\n3. Endereço completo\n4. Forma de pagamento (PIX ou Cartão)\n5. Resumo final + confirmação do cliente"
         )
 
     # Monta contexto estruturado com informações completas
     structured_context = f"""=== RESUMO DO PEDIDO ===
+Produto: {product_name_ctx} ({product_price_ctx})
+Entrega: {delivery_date_ctx} às {delivery_time_ctx}
+Endereço: {"Retirada no local" if is_retirada else delivery_address_ctx}
+Pagamento: {payment_normalized}
+Resumo original:
 {customer_context}
 Horário de Atendimento: Seg-Sex 08:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
 ====================="""

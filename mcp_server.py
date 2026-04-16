@@ -39,6 +39,8 @@ EMBEDDING_TABLE_READY = False
 QUERY_COMPATIBILITY_THRESHOLD = float(os.getenv("QUERY_COMPATIBILITY_THRESHOLD", "0.86"))
 QUERY_COMPATIBILITY_MAX_ITEMS = int(os.getenv("QUERY_COMPATIBILITY_MAX_ITEMS", "600"))
 QUERY_COMPATIBILITY_DB_LOOKBACK = int(os.getenv("QUERY_COMPATIBILITY_DB_LOOKBACK", "400"))
+KNOWLEDGE_SEARCH_SCAN_LIMIT = int(os.getenv("KNOWLEDGE_SEARCH_SCAN_LIMIT", "600"))
+KNOWLEDGE_SEARCH_MIN_SCORE = float(os.getenv("KNOWLEDGE_SEARCH_MIN_SCORE", "0.35"))
 QUERY_STOPWORDS = {
     "a", "as", "o", "os", "de", "da", "do", "das", "dos", "e", "ou", "em", "no", "na",
     "nos", "nas", "por", "para", "pra", "pro", "com", "sem", "um", "uma", "uns", "umas",
@@ -2628,6 +2630,111 @@ async def calculate_freight(city: str, payment_method: Optional[str] = None) -> 
             return "O frete para Campina Grande no CARTÃO é R$ 10,00 🚚. Entregamos também em outras cidades até 20 km. Os detalhes de frete serão passados ao fim do atendimento 😊"
     
     return "Entregamos em Campina Grande (grátis no PIX) e em outras cidades até 20 km. Os detalhes de frete serão passados ao fim do atendimento 😊"
+
+@mcp.tool()
+async def query_company_knowledge(question: str, top_k: int = 4) -> str:
+    """
+    Busca semântica na base de conhecimento institucional (PDFs ingeridos no LAB).
+    Use para dúvidas sobre políticas, funcionamento da empresa, processos e FAQ geral.
+    """
+    question = (question or "").strip()
+    if not question:
+        return _format_structured_response(
+            {"status": "error", "error": "missing_question"},
+            "⚠️ Informe uma pergunta para consultar a base institucional.",
+        )
+
+    if top_k <= 0:
+        top_k = 4
+    top_k = min(top_k, 10)
+
+    query_embedding = await _get_embedding_cached(f"knowledge::{question}")
+    if not query_embedding:
+        return _format_structured_response(
+            {"status": "error", "error": "embedding_unavailable"},
+            "⚠️ Não consegui gerar embedding para essa consulta agora.",
+        )
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+              c.id,
+              c.chunk_index,
+              c.page_number,
+              c.text_content,
+              c.embedding,
+              d.id AS document_id,
+              d.title AS document_title
+            FROM public.knowledge_chunks c
+            JOIN public.knowledge_documents d ON d.id = c.document_id
+            WHERE d.status = 'active'
+            ORDER BY d.updated_at DESC, c.chunk_index ASC
+            LIMIT $1
+            """,
+            KNOWLEDGE_SEARCH_SCAN_LIMIT,
+        )
+
+    scored: List[Dict[str, Any]] = []
+    for row in rows:
+        raw_vector = row["embedding"]
+        vector: List[float] = []
+        try:
+            if isinstance(raw_vector, str):
+                raw_vector = json.loads(raw_vector)
+            if isinstance(raw_vector, list):
+                vector = [float(v) for v in raw_vector]
+        except Exception as e:
+            _safe_print(f"⚠️ Erro ao parsear embedding de knowledge chunk {row['id']}: {e}")
+            vector = []
+
+        score = _cosine_similarity(query_embedding, vector)
+        if score < KNOWLEDGE_SEARCH_MIN_SCORE:
+            continue
+
+        scored.append(
+            {
+                "chunk_id": str(row["id"]),
+                "document_id": str(row["document_id"]),
+                "document_title": str(row["document_title"]),
+                "chunk_index": int(row["chunk_index"]),
+                "page_number": int(row["page_number"]) if row["page_number"] is not None else None,
+                "score": round(float(score), 4),
+                "text": str(row["text_content"]),
+            }
+        )
+
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    hits = scored[:top_k]
+
+    if not hits:
+        return _format_structured_response(
+            {
+                "status": "not_found",
+                "confidence": 0,
+                "snippets": [],
+            },
+            "Não encontrei trecho confiável na base institucional para essa dúvida. Se quiser, posso encaminhar para o atendente confirmar.",
+        )
+
+    confidence = max(hit["score"] for hit in hits)
+    humanized_lines = ["📚 Encontrei estes trechos da base institucional:"]
+    for idx, hit in enumerate(hits, 1):
+        page_label = f"p.{hit['page_number']}" if hit["page_number"] else "p.n/a"
+        snippet = hit["text"][:260].strip().replace("\\n", " ")
+        humanized_lines.append(
+            f"{idx}. {hit['document_title']} ({page_label}) — {snippet}"
+        )
+
+    return _format_structured_response(
+        {
+            "status": "success",
+            "confidence": round(float(confidence), 4),
+            "snippets": hits,
+        },
+        "\\n".join(humanized_lines),
+    )
 
 @mcp.tool()
 async def get_current_business_hours() -> str:

@@ -2809,8 +2809,6 @@ Produto: {product_name_ctx} ({product_price_ctx})
 Entrega: {delivery_date_ctx} às {delivery_time_ctx}
 Endereço: {"Retirada no local" if is_retirada else delivery_address_ctx}
 Pagamento: {payment_normalized}
-Resumo original:
-{customer_context}
 Horário de Atendimento: Seg-Sex 08:30-12:00 | 14:00-17:00 | Sáb 08:00-11:00
 ====================="""
     

@@ -1422,6 +1422,9 @@ async def consultarCatalogo(
     contexto: str,
     preco_minimo: Optional[float] = None,
     preco_maximo: Optional[float] = None,
+    categorias: Optional[List[str]] = None,
+    tipo_produto: Optional[str] = None,
+    ordenar_por: Optional[str] = None,
     exclude_ids: Optional[List[str]] = None,
     top_k: Optional[int] = 10,
 ) -> str:
@@ -1440,6 +1443,9 @@ async def consultarCatalogo(
                   ❌ "presente" - MUITO VAGO
         preco_minimo: Mínimo opcional (inferido do contexto se não fornecido)
         preco_maximo: Máximo opcional (inferido do contexto se não fornecido)
+        categorias: Lista opcional de categorias (ex.: ["romântico", "aniversário"])
+        tipo_produto: Tipo opcional de produto (nome do ProductType, ex.: "cestas")
+        ordenar_por: Opcional: "relevancia" | "preco_asc" | "preco_desc"
         exclude_ids: OBRIGATÓRIO quando o cliente pede "mais opções" ou já recebeu produtos antes.
                      Liste os IDs de TODOS os produtos já apresentados nesta conversa.
                      Isso garante que produtos diferentes sejam retornados a cada chamada.
@@ -1495,6 +1501,9 @@ async def consultarCatalogo(
 
             top_k = int(top_k) if top_k else 10
             top_k = max(2, min(10, top_k))
+            categorias_norm = [str(c).strip().lower() for c in (categorias or []) if str(c).strip()]
+            tipo_norm = (tipo_produto or "").strip().lower()
+            ordenar_norm = (ordenar_por or "relevancia").strip().lower()
 
             _safe_print(f"🔍 Busca: termo='{termo_normalizado}', preço=[{preco_minimo:.2f}-{preco_maximo:.2f}]")
 
@@ -1563,18 +1572,42 @@ async def consultarCatalogo(
                     continue
                 
                 query = """
-                SELECT id, name, description, price, image_url, production_time,
-                       (CASE WHEN name ILIKE $1 THEN 100 ELSE 0 END +
-                        CASE WHEN description ILIKE $1 THEN 50 ELSE 0 END) as relevance_score,
-                       (name ILIKE $1 OR description ILIKE $1) as is_exact_match
-                FROM public."Product"
-                WHERE price >= $2 AND price <= $3 AND is_active = true
-                  AND NOT (id::TEXT = ANY($4::TEXT[]))
+                SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
+                       pt.name as product_type,
+                       (CASE WHEN p.name ILIKE $1 THEN 100 ELSE 0 END +
+                        CASE WHEN p.description ILIKE $1 THEN 50 ELSE 0 END) as relevance_score,
+                       (p.name ILIKE $1 OR p.description ILIKE $1) as is_exact_match
+                FROM public."Product" p
+                LEFT JOIN public."ProductType" pt ON pt.id = p.type_id
+                WHERE p.price >= $2 AND p.price <= $3 AND p.is_active = true
+                  AND NOT (p.id::TEXT = ANY($4::TEXT[]))
+                  AND ($7::boolean = false OR LOWER(pt.name) = LOWER($6))
+                  AND (
+                    $9::boolean = false
+                    OR EXISTS (
+                      SELECT 1
+                      FROM public."ProductCategory" pc
+                      JOIN public."Category" c ON c.id = pc.category_id
+                      WHERE pc.product_id = p.id
+                        AND LOWER(c.name) = ANY($8::TEXT[])
+                    )
+                  )
                 ORDER BY is_exact_match DESC, relevance_score DESC, price DESC
                 LIMIT $5;
                 """
-                
-                rows = await conn.fetch(query, f"%{search_term}%", preco_minimo, preco_maximo, exclude_ids, top_k)
+
+                rows = await conn.fetch(
+                    query,
+                    f"%{search_term}%",
+                    preco_minimo,
+                    preco_maximo,
+                    exclude_ids,
+                    top_k,
+                    tipo_norm,
+                    bool(tipo_norm),
+                    categorias_norm,
+                    bool(categorias_norm),
+                )
                 for row in rows:
                     row_dict = dict(row)
                     row_id = str(row_dict["id"])
@@ -1634,6 +1667,10 @@ async def consultarCatalogo(
                 boost = _priority_boost(row)
                 normalized_name = _normalize_embedding_text(row.get("name") or "")
                 name_match = 1 if (requested_keywords and any(k in normalized_name for k in requested_keywords)) else 0
+                if ordenar_norm == "preco_asc":
+                    return (-name_match, -boost, price, -rel)
+                if ordenar_norm == "preco_desc":
+                    return (-name_match, -boost, -price, -rel)
                 price_pref = price if prefer_high_price else 0
                 return (-name_match, -boost, -price_pref, -rel, -price)
 
@@ -2708,7 +2745,59 @@ async def query_company_knowledge(question: str, top_k: int = 4) -> str:
     scored.sort(key=lambda item: item["score"], reverse=True)
     hits = scored[:top_k]
 
-    if not hits:
+    kb_hits: List[Dict[str, Any]] = []
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            kb_rows = await conn.fetch(
+                """
+                SELECT d.id, d.title, d.content, e.vector
+                FROM public.kb_knowledge_documents d
+                LEFT JOIN public.kb_embeddings e ON e.document_id = d.id
+                WHERE d.approval_status = 'approved'
+                ORDER BY d.updated_at DESC
+                LIMIT 120
+                """
+            )
+
+        q_tokens = [t for t in question.lower().split() if len(t) > 2]
+        for row in kb_rows:
+            emb_score = 0.0
+            raw_vec = row.get("vector")
+            if raw_vec:
+                try:
+                    vec = json.loads(raw_vec) if isinstance(raw_vec, str) else []
+                    emb_score = float(_cosine_similarity(query_embedding, vec))
+                except Exception:
+                    emb_score = 0.0
+
+            title = str(row.get("title") or "")
+            content = str(row.get("content") or "")
+            title_lower = title.lower()
+            content_lower = content.lower()
+            kw_score = 0.0
+            if any(tok in title_lower for tok in q_tokens):
+                kw_score += 0.12
+            if any(tok in content_lower for tok in q_tokens):
+                kw_score += 0.08
+
+            final_score = emb_score + kw_score
+            if final_score >= max(0.18, KNOWLEDGE_SEARCH_MIN_SCORE - 0.08):
+                kb_hits.append(
+                    {
+                        "document_title": title,
+                        "score": round(float(final_score), 4),
+                        "text": content,
+                        "source": "kb_markdown",
+                    }
+                )
+    except Exception as kb_err:
+        _safe_print(f"⚠️ Falha ao consultar kb_knowledge_documents: {kb_err}")
+
+    kb_hits.sort(key=lambda item: item["score"], reverse=True)
+    kb_hits = kb_hits[: max(1, top_k // 2)]
+
+    if not hits and not kb_hits:
         return _format_structured_response(
             {
                 "status": "not_found",
@@ -2718,7 +2807,7 @@ async def query_company_knowledge(question: str, top_k: int = 4) -> str:
             "Não encontrei trecho confiável na base institucional para essa dúvida. Se quiser, posso encaminhar para o atendente confirmar.",
         )
 
-    confidence = max(hit["score"] for hit in hits)
+    confidence = max([hit["score"] for hit in hits] + [hit["score"] for hit in kb_hits] + [0])
     humanized_lines = ["📚 Encontrei estes trechos da base institucional:"]
     for idx, hit in enumerate(hits, 1):
         page_label = f"p.{hit['page_number']}" if hit["page_number"] else "p.n/a"
@@ -2727,11 +2816,21 @@ async def query_company_knowledge(question: str, top_k: int = 4) -> str:
             f"{idx}. {hit['document_title']} ({page_label}) — {snippet}"
         )
 
+    if kb_hits:
+        humanized_lines.append("\n🗂️ Documentos internos relevantes:")
+        base_idx = len(hits)
+        for offset, hit in enumerate(kb_hits, 1):
+            snippet = hit["text"][:220].strip().replace("\\n", " ")
+            humanized_lines.append(
+                f"{base_idx + offset}. {hit['document_title']} — {snippet}"
+            )
+
     return _format_structured_response(
         {
             "status": "success",
             "confidence": round(float(confidence), 4),
             "snippets": hits,
+            "kb_snippets": kb_hits,
         },
         "\\n".join(humanized_lines),
     )

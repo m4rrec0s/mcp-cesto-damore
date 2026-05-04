@@ -1418,413 +1418,164 @@ def _normalize_product_search_term(termo: str) -> str:
 
 @mcp.tool()
 async def consultarCatalogo(
-    termo: str,
-    contexto: str,
-    preco_minimo: Optional[float] = None,
-    preco_maximo: Optional[float] = None,
-    categorias: Optional[List[str]] = None,
-    tipo_produto: Optional[str] = None,
-    ordenar_por: Optional[str] = None,
-    exclude_ids: Optional[List[str]] = None,
+    sql: str,
     top_k: Optional[int] = 10,
 ) -> str:
     """
-    🔍 Busca produtos no catálogo usando contexto OBRIGATÓRIO.
+    🔍 Busca produtos no catálogo via SQL (somente SELECT).
 
-    CRÍTICO: contexto é OBRIGATÓRIO - sem ele os resultados são errados!
-    CRÍTICO: Ao buscar "mais opções", SEMPRE passe os IDs dos produtos já mostrados em exclude_ids!
-             Sem exclude_ids, os MESMOS produtos serão retornados toda vez (busca determinística).
+    IMPORTANTE:
+    - Este tool aceita APENAS o campo `sql` (e opcionalmente `top_k`).
+    - A LLM deve enviar um SELECT explícito no campo `sql`.
+    - Qualquer comando não-SELECT será bloqueado.
 
-    Args:
-        termo: Tipo/nome do produto (e.g., "cesto romantico", "buquê")
-        contexto: OBRIGATÓRIO - Contexto COMPLETO com ocasião, motivo, destinatário, orçamento
-                  ✅ "Para aniversário da namorada, gosta de flores, até R$ 200"
-                  ✅ "Presente para mãe no dia das mães, orçamento R$ 150"
-                  ❌ "presente" - MUITO VAGO
-        preco_minimo: Mínimo opcional (inferido do contexto se não fornecido)
-        preco_maximo: Máximo opcional (inferido do contexto se não fornecido)
-        categorias: Lista opcional de categorias (ex.: ["romântico", "aniversário"])
-        tipo_produto: Tipo opcional de produto (nome do ProductType, ex.: "cestas")
-        ordenar_por: Opcional: "relevancia" | "preco_asc" | "preco_desc"
-        exclude_ids: OBRIGATÓRIO quando o cliente pede "mais opções" ou já recebeu produtos antes.
-                     Liste os IDs de TODOS os produtos já apresentados nesta conversa.
-                     Isso garante que produtos diferentes sejam retornados a cada chamada.
-                     ✅ ["123", "456"] — quando os produtos de id 123 e 456 já foram mostrados
-                     ✅ ["123", "456", "789"] — terceira rodada, três produtos excluídos
-                     ❌ [] ou None — quando já houve apresentação anterior (causa repetição!)
-        top_k: Quantidade de resultados (max 10, default 10)
+    Tabelas permitidas:
+    - public."Product"
+    - public."ProductType"
+    - public."Category"
+    - public."ProductCategory"
 
-    Retorna: JSON com status, termos, e listas de produtos exatos e fallback.
+    Campos principais de Product:
+    - id, name, description, price, is_active, image_url, production_time, type_id
     """
     try:
-        contexto_limpo = (contexto or "").strip()
-        executed_sql: List[Dict[str, Any]] = []
-        
-        # ⚠️ Validação crítica
-        if not contexto_limpo or contexto_limpo.lower() == termo.lower():
-            raise ValueError(
-                "❌ CONTEXTO OBRIGATÓRIO E DIFERENTE DO TERMO!\n"
-                "Você DEVE requisitar um contexto COMPLETO.\n"
-                "Exemplos corretos:\n"
-                "  ✅ 'Para aniversário da minha namorada, gosta de flores, até R$ 200'\n"
-                "  ✅ 'Presente para mãe, ocasião dia das mães, orçamento R$ 150'\n"
-                "Exemplos INCORRETOS:\n"
-                "  ❌ Apenas o termo sem contexto\n"
-                "  ❌ Contexto=termo (apenas repetição)"
+        raw_sql = (sql or "").strip()
+        if not raw_sql:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error_type": "validation_error",
+                    "message": "Campo sql é obrigatório em consultarCatalogo.",
+                },
+                ensure_ascii=False,
             )
-        
-        termo_normalizado = _normalize_product_search_term(termo)
-        
+
+        normalized = re.sub(r"\s+", " ", raw_sql).strip()
+        lowered = normalized.lower()
+
+        if not lowered.startswith("select "):
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "error_type": "security_error",
+                    "message": "Apenas SELECT é permitido em consultarCatalogo.",
+                },
+                ensure_ascii=False,
+            )
+
+        forbidden = [
+            " insert ", " update ", " delete ", " drop ", " alter ", " truncate ",
+            " create ", " grant ", " revoke ", " merge ", " call ", " execute ", " do ",
+        ]
+        padded = f" {lowered} "
+        if any(token in padded for token in forbidden):
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "error_type": "security_error",
+                    "message": "Consulta bloqueada: apenas SELECT de leitura é permitido.",
+                },
+                ensure_ascii=False,
+            )
+
+        if ";" in lowered[:-1]:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "error_type": "security_error",
+                    "message": "Apenas uma instrução SELECT por chamada é permitida.",
+                },
+                ensure_ascii=False,
+            )
+
+        allowed_tables = {
+            'public."product"', '"product"', "product",
+            'public."producttype"', '"producttype"', "producttype",
+            'public."category"', '"category"', "category",
+            'public."productcategory"', '"productcategory"', "productcategory",
+        }
+        found_tables = re.findall(r"(?:from|join)\s+([\w\.\"]+)", lowered)
+        if not found_tables:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "error_type": "security_error",
+                    "message": "Não identifiquei tabela válida no SQL.",
+                },
+                ensure_ascii=False,
+            )
+        for table in found_tables:
+            if table.strip() not in allowed_tables:
+                return json.dumps(
+                    {
+                        "status": "blocked",
+                        "error_type": "security_error",
+                        "message": f"Tabela não permitida: {table}",
+                    },
+                    ensure_ascii=False,
+                )
+
+        safe_top_k = int(top_k) if top_k else 10
+        safe_top_k = max(1, min(100, safe_top_k))
+        final_sql = normalized
+        if not re.search(r"\blimit\b", lowered):
+            final_sql = normalized.rstrip(";") + f" LIMIT {safe_top_k}"
+
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            # Extrai limites de preço
-            exclude_ids = exclude_ids or []
-            exclude_ids = [str(id) for id in exclude_ids]
-            price_source = f"{termo_normalizado} {contexto_limpo}".strip()
-            ctx_min, ctx_max = _extract_price_bounds(price_source)
+            rows = await conn.fetch(final_sql)
 
-            budget_present_in_input = (preco_minimo is not None) or (preco_maximo is not None)
-            budget_present_in_context = (ctx_min is not None) or (ctx_max is not None)
-            prefer_high_price = not (budget_present_in_input or budget_present_in_context)
+        result_rows = [dict(r) for r in rows]
+        if not result_rows:
+            return json.dumps(
+                {
+                    "status": "not_found",
+                    "sql": final_sql,
+                    "debug_sql": [
+                        {
+                            "strategy": "direct_sql_only",
+                            "sql": final_sql,
+                            "rows": 0,
+                        }
+                    ],
+                    "exatos": [],
+                    "fallback": [],
+                    "message": "Sem resultados para esta query SQL.",
+                },
+                ensure_ascii=False,
+            )
 
-            if preco_minimo is None:
-                preco_minimo = ctx_min if ctx_min is not None else 0.0
-            if preco_maximo is None:
-                preco_maximo = ctx_max if ctx_max is not None else 999999.0
+        formatted = []
+        for idx, r in enumerate(result_rows, 1):
+            formatted.append(
+                {
+                    "ranking": idx,
+                    "id": str(r.get("id", "")),
+                    "nome": r.get("name") or r.get("nome") or "",
+                    "preco": float(r.get("price") or r.get("preco") or 0),
+                    "descricao": r.get("description") or r.get("descricao") or "",
+                    "imagem": r.get("image_url") or r.get("imagem") or "https://api.cestodamore.com.br/images/default-product.webp",
+                    "production_time": int(r.get("production_time") or 1),
+                    "tipo_resultado": "EXATO",
+                }
+            )
 
-            if ctx_min is not None and preco_minimo < ctx_min:
-                preco_minimo = ctx_min
-            if ctx_max is not None and preco_maximo > ctx_max:
-                preco_maximo = ctx_max
-
-            if preco_minimo > preco_maximo:
-                preco_minimo, preco_maximo = preco_maximo, preco_minimo
-
-            top_k = int(top_k) if top_k else 10
-            top_k = max(2, min(10, top_k))
-            categorias_norm = [str(c).strip().lower() for c in (categorias or []) if str(c).strip()]
-            tipo_norm = (tipo_produto or "").strip().lower()
-            ordenar_norm = (ordenar_por or "relevancia").strip().lower()
-
-            def normalize_text(value: str) -> str:
-                base = (value or "").strip().lower()
-                return "".join(
-                    c for c in unicodedata.normalize("NFD", base)
-                    if unicodedata.category(c) != "Mn"
-                )
-
-            categorias_norm = [normalize_text(c) for c in categorias_norm]
-
-            _safe_print(f"🔍 Busca: termo='{termo_normalizado}', preço=[{preco_minimo:.2f}-{preco_maximo:.2f}]")
-
-            # Função auxiliar para gerar variantes (com/sem acento)
-            def get_variants(t):
-                if not t: 
-                    return []
-                variants = [t]
-                no_accents = "".join(
-                    c for c in unicodedata.normalize("NFD", t)
-                    if unicodedata.category(c) != "Mn"
-                )
-                if no_accents != t:
-                    variants.append(no_accents)
-                return variants
-
-            common_words = {"o", "a", "de", "da", "do", "em", "um", "uma", "e", "ou", "para", "por", "com",
-                            "que", "quero", "quer", "tem", "ter", "pra", "pro", "meu", "minha", "seu", "sua",
-                            "ele", "ela", "nos", "nosso", "muito", "mais", "como", "ser", "está", "estou",
-                            "esse", "essa", "isso", "aqui", "ali", "bem", "bom", "boa", "vai", "vou",
-                            "sim", "não", "nao", "mas", "ainda", "todo", "toda", "tipo", "gostaria",
-                            "preciso", "busco", "procuro", "algo", "coisa", "opcao", "opção"}
-            
-            context_product_keywords = {
-                "criança", "crianca", "crianças", "criancas", "infantil", "kids",
-                "filho", "filha", "bebê", "bebe", "menino", "menina",
-                "romântico", "romantico", "romântica", "romantica", "namorada", "namorado",
-                "amor", "coração", "coracao", "casal",
-                "aniversário", "aniversario", "birthday",
-                "café", "cafe", "coffee",
-                "chocolate", "chocolates",
-                "flores", "flor", "rosa", "rosas", "buquê", "buque",
-                "pelúcia", "pelucia", "urso", "teddy",
-                "caneca", "canecas", "quadro", "quadros",
-                "bar", "cerveja", "festa",
-                "mãe", "mae", "pai", "esposa", "marido",
-                "express", "rápido", "rapido", "pronta",
-            }
-            
-            # Constrói lista de termos para buscar
-            search_terms = list(dict.fromkeys(get_variants(termo_normalizado)))
-            for w in termo_normalizado.split():
-                if w.strip().lower() not in common_words and len(w.strip()) > 2:
-                    search_terms.extend(get_variants(w.strip()))
-            search_terms.extend(get_variants(termo))
-            
-            # Extrai keywords relevantes do contexto para busca ILIKE
-            contexto_words = re.split(r"[\s,;.!?]+", contexto_limpo.lower())
-            for cw in contexto_words:
-                cw_clean = cw.strip()
-                if cw_clean in context_product_keywords and cw_clean not in common_words:
-                    normalized_cw = _normalize_product_search_term(cw_clean)
-                    search_terms.extend(get_variants(normalized_cw))
-                    if normalized_cw != cw_clean:
-                        search_terms.extend(get_variants(cw_clean))
-            
-            search_terms = list(dict.fromkeys([t for t in search_terms if t.strip()]))
-            
-            _safe_print(f"🔑 Termos de busca: {search_terms[:3]}")
-
-            all_rows_by_id: Dict[str, Dict[str, Any]] = {}
-
-            # =====================================================
-            # 1) PRIORIDADE MÁXIMA: busca SQL estruturada (precisa)
-            # =====================================================
-            # Estratégia:
-            # - Usa termo + contexto + filtros de preço/tipo/categoria
-            # - Ranking por match no nome/descrição e aderência contextual
-            # - Mantém fallback semântico/iterativo abaixo se necessário
-            try:
-                sql_context = f"{termo_normalizado} {contexto_limpo}".strip().lower()
-                context_tokens = [
-                    normalize_text(t) for t in re.split(r"[^a-zA-ZÀ-ÿ0-9]+", sql_context)
-                    if t and len(t) >= 3 and t not in common_words
-                ][:20]
-
-                category_tokens = categorias_norm or [
-                    t for t in context_tokens
-                    if t in {
-                        "romantico", "romântico", "aniversario", "aniversário", "mae", "mãe",
-                        "flores", "flor", "chocolate", "cafe", "café", "pelucia", "pelúcia", "caneca"
-                    }
-                ][:5]
-
-                # Query SQL única e estruturada para priorizar resultados assertivos
-                primary_query = """
-                SELECT
-                    p.id,
-                    p.name,
-                    p.description,
-                    p.price,
-                    p.image_url,
-                    p.production_time,
-                    pt.name AS product_type,
-                    COALESCE(array_agg(DISTINCT c.name) FILTER (WHERE c.name IS NOT NULL), '{}') AS categories,
-                    (
-                        CASE WHEN translate(lower(p.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1 THEN 180 ELSE 0 END +
-                        CASE WHEN translate(lower(COALESCE(p.description, '')), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1 THEN 80 ELSE 0 END +
-                        CASE WHEN $7::boolean AND translate(lower(pt.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = $6 THEN 70 ELSE 0 END +
-                        CASE
-                            WHEN array_length($8::TEXT[], 1) IS NOT NULL THEN
-                                (
-                                    SELECT COUNT(*)::int * 18
-                                    FROM public."ProductCategory" pc2
-                                    JOIN public."Category" c2 ON c2.id = pc2.category_id
-                                    WHERE pc2.product_id = p.id
-                                      AND translate(lower(c2.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = ANY($8::TEXT[])
-                                )
-                            ELSE 0
-                        END
-                    ) AS relevance_score,
-                    (
-                        translate(lower(p.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1
-                        OR translate(lower(COALESCE(p.description, '')), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1
-                    ) AS is_exact_match
-                FROM public."Product" p
-                LEFT JOIN public."ProductType" pt ON pt.id = p.type_id
-                LEFT JOIN public."ProductCategory" pc ON pc.product_id = p.id
-                LEFT JOIN public."Category" c ON c.id = pc.category_id
-                WHERE p.is_active = true
-                  AND p.price >= $2
-                  AND p.price <= $3
-                  AND NOT (p.id::TEXT = ANY($4::TEXT[]))
-                  AND ($7::boolean = false OR translate(lower(pt.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = $6)
-                  AND (
-                      array_length($8::TEXT[], 1) IS NULL
-                      OR EXISTS (
-                          SELECT 1
-                          FROM public."ProductCategory" pcx
-                          JOIN public."Category" cx ON cx.id = pcx.category_id
-                          WHERE pcx.product_id = p.id
-                            AND translate(lower(cx.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = ANY($8::TEXT[])
-                      )
-                  )
-                  AND (
-                      $9::boolean = false
-                      OR EXISTS (
-                          SELECT 1
-                          FROM unnest($10::TEXT[]) tk
-                          WHERE translate(lower(p.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE ('%' || tk || '%')
-                             OR translate(lower(COALESCE(p.description, '')), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE ('%' || tk || '%')
-                      )
-                  )
-                GROUP BY p.id, pt.name
-                ORDER BY is_exact_match DESC, relevance_score DESC, p.price DESC
-                LIMIT $5
-                """
-
-                primary_rows = await conn.fetch(
-                    primary_query,
-                    f"%{normalize_text(termo_normalizado)}%",
-                    preco_minimo,
-                    preco_maximo,
-                    exclude_ids,
-                    top_k,
-                    tipo_norm,
-                    bool(tipo_norm),
-                    category_tokens,
-                    bool(context_tokens),
-                    context_tokens,
-                )
-                executed_sql.append(
+        return json.dumps(
+            {
+                "status": "found",
+                "sql": final_sql,
+                "debug_sql": [
                     {
-                        "strategy": "primary_structured_sql",
-                        "sql": "SELECT Product + joins with filters (price/type/category/context_tokens)",
-                        "params": {
-                            "term": normalize_text(termo_normalizado),
-                            "preco_minimo": preco_minimo,
-                            "preco_maximo": preco_maximo,
-                            "tipo_produto": tipo_norm,
-                            "categorias": category_tokens,
-                            "context_tokens": context_tokens,
-                            "exclude_ids": exclude_ids,
-                            "top_k": top_k,
-                        },
-                        "rows": len(primary_rows),
+                        "strategy": "direct_sql_only",
+                        "sql": final_sql,
+                        "rows": len(result_rows),
                     }
-                )
-
-                for row in primary_rows:
-                    row_dict = dict(row)
-                    row_id = str(row_dict["id"])
-                    all_rows_by_id[row_id] = row_dict
-
-                _safe_print(
-                    f"🎯 SQL estruturado retornou {len(primary_rows)} produto(s) (prioridade máxima)"
-                )
-            except Exception as sql_struct_error:
-                _safe_print(f"⚠️ Falha na busca SQL estruturada, seguindo fallback: {sql_struct_error}")
-            
-            # =====================================================
-            # 2) SECUNDÁRIO DESABILITADO
-            # Conforme decisão de produto: usar APENAS SQL estruturado primário.
-            # =====================================================
-
-            all_rows = list(all_rows_by_id.values())
-            
-            # Separa exatos de fallback
-            exact_matches = [dict(r) for r in all_rows if r['is_exact_match']]
-            fallback_matches = [dict(r) for r in all_rows if not r['is_exact_match']]
-
-            requested_keywords = set()
-            generic_terms = {"cesta", "cesto", "presente", "presenca", "gift"}
-            for tk in (termo_normalizado or "").split():
-                if len(tk) >= 4 and tk not in generic_terms:
-                    requested_keywords.add(tk)
-
-            def _priority_boost(row: Dict[str, Any]) -> float:
-                """Prioriza pronta-entrega, itens especiais e garante que o termo pedido pese (ex.: caneca/pelúcia/quadro/aniversario)."""
-                desc = ((row.get("description") or "") + " " + (row.get("name") or "")).lower()
-                normalized_name = _normalize_embedding_text(row.get("name") or "")
-                ready_keywords = ["pronta", "pronta_entrega", "pronto", "hoje", "agora", "express"]
-                special_keywords = ["polaroid", "foto", "fotos", "pelúcia", "pelucia", "urso", "teddy", "quadro", "caneca"]
-                ready_bonus = 0
-                if any(k in desc for k in ready_keywords):
-                    ready_bonus += 40
-                prod_time = row.get("production_time")
-                try:
-                    if prod_time is not None and float(prod_time) <= 1:
-                        ready_bonus += 25
-                except Exception:
-                    pass
-                special_bonus = 30 if any(k in desc for k in special_keywords) else 0
-                requested_bonus = 0
-                if requested_keywords and any(k in desc for k in requested_keywords):
-                    requested_bonus += 60  # termo pedido pesa bastante
-                name_match_bonus = 0
-                if requested_keywords and any(k in normalized_name for k in requested_keywords):
-                    name_match_bonus += 120  # nome compatível domina o ranking
-                if "aniver" in normalized_name and any("aniver" in k for k in requested_keywords):
-                    name_match_bonus += 50  # reforço específico para aniversário
-                return ready_bonus + special_bonus + requested_bonus + name_match_bonus
-
-            def _sort_key_exact(row: Dict[str, Any]):
-                rel = int(row.get("relevance_score") or 0)
-                price = float(row.get("price") or 0)
-                boost = _priority_boost(row)
-                normalized_name = _normalize_embedding_text(row.get("name") or "")
-                name_match = 1 if (requested_keywords and any(k in normalized_name for k in requested_keywords)) else 0
-                if ordenar_norm == "preco_asc":
-                    return (-name_match, -boost, price, -rel)
-                if ordenar_norm == "preco_desc":
-                    return (-name_match, -boost, -price, -rel)
-                price_pref = price if prefer_high_price else 0
-                return (-name_match, -boost, -price_pref, -rel, -price)
-
-            exact_matches = sorted(exact_matches, key=_sort_key_exact)
-
-            missing_slots = max(0, top_k - len(exact_matches))
-
-            if missing_slots > 0 and fallback_matches:
-                fallback_matches = sorted(
-                    fallback_matches,
-                    key=lambda r: (
-                        -_priority_boost(r),
-                        -float(r.get("relevance_score") or 0),
-                        -float(r.get("price") or 0) if prefer_high_price else float(r.get("price") or 0),
-                    ),
-                )[:missing_slots]
-            else:
-                fallback_matches = fallback_matches[:missing_slots]
-
-            exact_matches = exact_matches[:top_k]
-            
-            _safe_print(f"📦 Encontrados {len(exact_matches)} exatos + {len(fallback_matches)} fallback")
-            
-            structured = {
-                "status": "found" if (exact_matches or fallback_matches) else "not_found",
-                "termo": termo,
-                "contexto": contexto_limpo,
-                "debug_sql": executed_sql,
-                "exatos": [
-                    {
-                        "ranking": idx + 1,
-                        "id": str(r['id']),
-                        "nome": r['name'],
-                        "preco": float(r['price']),
-                        "descricao": r['description'],
-                        "imagem": r.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
-                        "production_time": int(r['production_time']) if r.get('production_time') else 1,
-                        "tipo_resultado": "EXATO",
-                    }
-                    for idx, r in enumerate(exact_matches)
                 ],
-                "fallback": [
-                    {
-                        "ranking": len(exact_matches) + idx + 1,
-                        "id": str(r['id']),
-                        "nome": r['name'],
-                        "preco": float(r['price']),
-                        "descricao": r['description'],
-                        "imagem": r.get('image_url') or "https://api.cestodamore.com.br/images/default-product.webp",
-                        "production_time": int(r['production_time']) if r.get('production_time') else 1,
-                        "tipo_resultado": "FALLBACK",
-                    }
-                    for idx, r in enumerate(fallback_matches)
-                ]
-            }
-
-            if executed_sql:
-                _safe_print(f"🧾 SQL debug: {json.dumps(executed_sql[:3], ensure_ascii=False)}")
-            
-            return json.dumps(structured, ensure_ascii=False)
-
-    except ValueError as ve:
-        _safe_print(f"⚠️ Erro de validação: {ve}")
-        return json.dumps({
-            "status": "error",
-            "error_type": "validation_error",
-            "message": str(ve),
-        }, ensure_ascii=False)
+                "exatos": formatted,
+                "fallback": [],
+            },
+            ensure_ascii=False,
+        )
     except Exception as e:
         _safe_print(f"❌ Erro em consultarCatalogo: {e}")
         return json.dumps({

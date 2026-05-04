@@ -1565,63 +1565,177 @@ async def consultarCatalogo(
             _safe_print(f"🔑 Termos de busca: {search_terms[:3]}")
 
             all_rows_by_id: Dict[str, Dict[str, Any]] = {}
-            
-            # Busca com cada termo
-            for search_term in search_terms:
-                if not search_term.strip() or search_term.strip().lower() in common_words:
-                    continue
-                
-                query = """
-                SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
-                       pt.name as product_type,
-                       (CASE WHEN p.name ILIKE $1 THEN 100 ELSE 0 END +
-                        CASE WHEN p.description ILIKE $1 THEN 50 ELSE 0 END) as relevance_score,
-                       (p.name ILIKE $1 OR p.description ILIKE $1) as is_exact_match
+
+            # =====================================================
+            # 1) PRIORIDADE MÁXIMA: busca SQL estruturada (precisa)
+            # =====================================================
+            # Estratégia:
+            # - Usa termo + contexto + filtros de preço/tipo/categoria
+            # - Ranking por match no nome/descrição e aderência contextual
+            # - Mantém fallback semântico/iterativo abaixo se necessário
+            try:
+                sql_context = f"{termo_normalizado} {contexto_limpo}".strip().lower()
+                context_tokens = [
+                    t for t in re.split(r"[^a-zA-ZÀ-ÿ0-9]+", sql_context)
+                    if t and len(t) >= 3 and t not in common_words
+                ][:20]
+
+                category_tokens = categorias_norm or [
+                    t for t in context_tokens
+                    if t in {
+                        "romantico", "romântico", "aniversario", "aniversário", "mae", "mãe",
+                        "flores", "flor", "chocolate", "cafe", "café", "pelucia", "pelúcia", "caneca"
+                    }
+                ][:5]
+
+                # Query SQL única e estruturada para priorizar resultados assertivos
+                primary_query = """
+                SELECT
+                    p.id,
+                    p.name,
+                    p.description,
+                    p.price,
+                    p.image_url,
+                    p.production_time,
+                    pt.name AS product_type,
+                    COALESCE(array_agg(DISTINCT c.name) FILTER (WHERE c.name IS NOT NULL), '{}') AS categories,
+                    (
+                        CASE WHEN LOWER(p.name) LIKE LOWER($1) THEN 180 ELSE 0 END +
+                        CASE WHEN LOWER(p.description) LIKE LOWER($1) THEN 80 ELSE 0 END +
+                        CASE WHEN $7::boolean AND LOWER(pt.name) = LOWER($6) THEN 70 ELSE 0 END +
+                        CASE
+                            WHEN array_length($8::TEXT[], 1) IS NOT NULL THEN
+                                (
+                                    SELECT COUNT(*)::int * 18
+                                    FROM public."ProductCategory" pc2
+                                    JOIN public."Category" c2 ON c2.id = pc2.category_id
+                                    WHERE pc2.product_id = p.id
+                                      AND LOWER(c2.name) = ANY($8::TEXT[])
+                                )
+                            ELSE 0
+                        END
+                    ) AS relevance_score,
+                    (
+                        LOWER(p.name) LIKE LOWER($1)
+                        OR LOWER(p.description) LIKE LOWER($1)
+                    ) AS is_exact_match
                 FROM public."Product" p
                 LEFT JOIN public."ProductType" pt ON pt.id = p.type_id
-                WHERE p.price >= $2 AND p.price <= $3 AND p.is_active = true
+                LEFT JOIN public."ProductCategory" pc ON pc.product_id = p.id
+                LEFT JOIN public."Category" c ON c.id = pc.category_id
+                WHERE p.is_active = true
+                  AND p.price >= $2
+                  AND p.price <= $3
                   AND NOT (p.id::TEXT = ANY($4::TEXT[]))
                   AND ($7::boolean = false OR LOWER(pt.name) = LOWER($6))
                   AND (
-                    $9::boolean = false
-                    OR EXISTS (
-                      SELECT 1
-                      FROM public."ProductCategory" pc
-                      JOIN public."Category" c ON c.id = pc.category_id
-                      WHERE pc.product_id = p.id
-                        AND LOWER(c.name) = ANY($8::TEXT[])
-                    )
+                      array_length($8::TEXT[], 1) IS NULL
+                      OR EXISTS (
+                          SELECT 1
+                          FROM public."ProductCategory" pcx
+                          JOIN public."Category" cx ON cx.id = pcx.category_id
+                          WHERE pcx.product_id = p.id
+                            AND LOWER(cx.name) = ANY($8::TEXT[])
+                      )
                   )
-                ORDER BY is_exact_match DESC, relevance_score DESC, price DESC
-                LIMIT $5;
+                  AND (
+                      $9::boolean = false
+                      OR EXISTS (
+                          SELECT 1
+                          FROM unnest($10::TEXT[]) tk
+                          WHERE LOWER(p.name) LIKE ('%' || tk || '%')
+                             OR LOWER(COALESCE(p.description, '')) LIKE ('%' || tk || '%')
+                      )
+                  )
+                GROUP BY p.id, pt.name
+                ORDER BY is_exact_match DESC, relevance_score DESC, p.price DESC
+                LIMIT $5
                 """
 
-                rows = await conn.fetch(
-                    query,
-                    f"%{search_term}%",
+                primary_rows = await conn.fetch(
+                    primary_query,
+                    f"%{termo_normalizado}%",
                     preco_minimo,
                     preco_maximo,
                     exclude_ids,
                     top_k,
                     tipo_norm,
                     bool(tipo_norm),
-                    categorias_norm,
-                    bool(categorias_norm),
+                    category_tokens,
+                    bool(context_tokens),
+                    context_tokens,
                 )
-                for row in rows:
+
+                for row in primary_rows:
                     row_dict = dict(row)
                     row_id = str(row_dict["id"])
+                    all_rows_by_id[row_id] = row_dict
 
-                    if row_id not in all_rows_by_id:
-                        all_rows_by_id[row_id] = row_dict
+                _safe_print(
+                    f"🎯 SQL estruturado retornou {len(primary_rows)} produto(s) (prioridade máxima)"
+                )
+            except Exception as sql_struct_error:
+                _safe_print(f"⚠️ Falha na busca SQL estruturada, seguindo fallback: {sql_struct_error}")
+            
+            # =====================================================
+            # 2) SECUNDÁRIO: fallback por variações de termo
+            # =====================================================
+            if len(all_rows_by_id) < max(2, top_k // 2):
+                for search_term in search_terms:
+                    if not search_term.strip() or search_term.strip().lower() in common_words:
                         continue
 
-                    existing = all_rows_by_id[row_id]
-                    existing["relevance_score"] = max(
-                        int(existing.get("relevance_score") or 0),
-                        int(row_dict.get("relevance_score") or 0),
+                    query = """
+                    SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
+                           pt.name as product_type,
+                           (CASE WHEN p.name ILIKE $1 THEN 100 ELSE 0 END +
+                            CASE WHEN p.description ILIKE $1 THEN 50 ELSE 0 END) as relevance_score,
+                           (p.name ILIKE $1 OR p.description ILIKE $1) as is_exact_match
+                    FROM public."Product" p
+                    LEFT JOIN public."ProductType" pt ON pt.id = p.type_id
+                    WHERE p.price >= $2 AND p.price <= $3 AND p.is_active = true
+                      AND NOT (p.id::TEXT = ANY($4::TEXT[]))
+                      AND ($7::boolean = false OR LOWER(pt.name) = LOWER($6))
+                      AND (
+                        $9::boolean = false
+                        OR EXISTS (
+                          SELECT 1
+                          FROM public."ProductCategory" pc
+                          JOIN public."Category" c ON c.id = pc.category_id
+                          WHERE pc.product_id = p.id
+                            AND LOWER(c.name) = ANY($8::TEXT[])
+                        )
+                      )
+                    ORDER BY is_exact_match DESC, relevance_score DESC, p.price DESC
+                    LIMIT $5;
+                    """
+
+                    rows = await conn.fetch(
+                        query,
+                        f"%{search_term}%",
+                        preco_minimo,
+                        preco_maximo,
+                        exclude_ids,
+                        top_k,
+                        tipo_norm,
+                        bool(tipo_norm),
+                        categorias_norm,
+                        bool(categorias_norm),
                     )
-                    existing["is_exact_match"] = bool(existing.get("is_exact_match")) or bool(row_dict.get("is_exact_match"))
+                    for row in rows:
+                        row_dict = dict(row)
+                        row_id = str(row_dict["id"])
+
+                        if row_id not in all_rows_by_id:
+                            all_rows_by_id[row_id] = row_dict
+                            continue
+
+                        existing = all_rows_by_id[row_id]
+                        existing["relevance_score"] = max(
+                            int(existing.get("relevance_score") or 0),
+                            int(row_dict.get("relevance_score") or 0),
+                        )
+                        existing["is_exact_match"] = bool(existing.get("is_exact_match")) or bool(row_dict.get("is_exact_match"))
 
             all_rows = list(all_rows_by_id.values())
             
@@ -1785,6 +1899,138 @@ async def consultarCatalogo(
             "error_type": "database_error",
             "message": str(e)
         }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def query_catalog_sql(sql: str, top_k: Optional[int] = 30) -> str:
+    """
+    Executa consulta SQL SOMENTE leitura (SELECT) para busca avançada de produtos.
+
+    Regras de segurança:
+    - Apenas SELECT único (sem múltiplas instruções)
+    - Proibido: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE
+    - Tabelas permitidas:
+      - public."Product"
+      - public."ProductType"
+      - public."Category"
+      - public."ProductCategory"
+
+    Dica de estrutura disponível:
+    - Product(id, name, description, price, is_active, image_url, production_time, type_id)
+    - ProductType(id, name)
+    - Category(id, name)
+    - ProductCategory(product_id, category_id)
+
+    Sempre inclua WHERE p.is_active = true em consultas de produtos.
+    """
+    try:
+        raw_sql = (sql or "").strip()
+        if not raw_sql:
+            return _format_structured_response(
+                {"status": "error", "error": "missing_sql"},
+                "⚠️ Informe um SELECT para consulta do catálogo.",
+            )
+
+        normalized = re.sub(r"\s+", " ", raw_sql).strip()
+        lowered = normalized.lower()
+
+        forbidden = [
+            " insert ", " update ", " delete ", " drop ", " alter ", " truncate ",
+            " create ", " grant ", " revoke ", " merge ", " call ", " execute ", " do ",
+        ]
+
+        # Somente SELECT único
+        if not lowered.startswith("select "):
+            return _format_structured_response(
+                {"status": "blocked", "reason": "only_select_allowed"},
+                "❌ Apenas comandos SELECT são permitidos nesta ferramenta.",
+            )
+
+        if ";" in lowered[:-1]:
+            return _format_structured_response(
+                {"status": "blocked", "reason": "multiple_statements_not_allowed"},
+                "❌ Apenas uma instrução SELECT por vez é permitida.",
+            )
+
+        padded = f" {lowered} "
+        if any(token in padded for token in forbidden):
+            return _format_structured_response(
+                {"status": "blocked", "reason": "forbidden_keyword"},
+                "❌ Consulta bloqueada: apenas leitura SELECT é permitida.",
+            )
+
+        allowed_tables = {
+            'public."product"', '"product"', "product",
+            'public."producttype"', '"producttype"', "producttype",
+            'public."category"', '"category"', "category",
+            'public."productcategory"', '"productcategory"', "productcategory",
+        }
+
+        found_tables = re.findall(r"(?:from|join)\s+([\w\.\"]+)", lowered)
+        if not found_tables:
+            return _format_structured_response(
+                {"status": "blocked", "reason": "no_table_found"},
+                "❌ Não identifiquei tabela na consulta. Use FROM/JOIN com tabelas permitidas.",
+            )
+
+        for table in found_tables:
+            t = table.strip()
+            if t not in allowed_tables:
+                return _format_structured_response(
+                    {
+                        "status": "blocked",
+                        "reason": "table_not_allowed",
+                        "table": table,
+                        "allowed_tables": sorted(list(allowed_tables)),
+                    },
+                    f"❌ Tabela não permitida: {table}. Use apenas tabelas de catálogo.",
+                )
+
+        # Enforce limite seguro
+        safe_limit = int(top_k) if top_k else 30
+        safe_limit = max(1, min(100, safe_limit))
+        if not re.search(r"\blimit\b", lowered):
+            normalized = normalized.rstrip(";") + f" LIMIT {safe_limit}"
+
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(normalized)
+
+        result_rows = [dict(r) for r in rows]
+        if not result_rows:
+            return _format_structured_response(
+                {
+                    "status": "not_found",
+                    "sql": normalized,
+                    "rows": [],
+                    "fallback": {
+                        "suggestion": "Use consultarCatalogo com contexto mais rico ou ajuste filtros de preço/categoria/tipo",
+                        "example": {
+                            "termo": "dia das mães",
+                            "contexto": "presente para mãe, orçamento até R$ 200, estilo delicado",
+                            "preco_maximo": 200,
+                        },
+                    },
+                },
+                "Não encontrei produtos com esses filtros. Posso tentar uma busca mais ampla com fallback semântico.",
+            )
+
+        # Resposta curta e estruturada para LLM
+        return _format_structured_response(
+            {
+                "status": "success",
+                "sql": normalized,
+                "count": len(result_rows),
+                "rows": result_rows,
+            },
+            f"Encontrei {len(result_rows)} resultado(s) via SQL de catálogo.",
+        )
+    except Exception as e:
+        _safe_print(f"❌ Erro em query_catalog_sql: {e}")
+        return _format_structured_response(
+            {"status": "error", "error_type": "database_error", "message": str(e)},
+            "⚠️ Falha ao executar SELECT no catálogo. Posso tentar um fallback por similaridade.",
+        )
 
 
     """Retorna itens adicionais (Balões, Chocolates, Ursos) para a cesta."""

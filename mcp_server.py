@@ -1418,164 +1418,104 @@ def _normalize_product_search_term(termo: str) -> str:
 
 @mcp.tool()
 async def consultarCatalogo(
-    sql: str,
-    top_k: Optional[int] = 10,
+    items: List[Dict[str, Any]],
+    top_k_per_item: Optional[int] = 5,
 ) -> str:
     """
-    🔍 Busca produtos no catálogo via SQL (somente SELECT).
+    🔍 Busca estruturada no catálogo de produtos.
+    
+    Permite realizar múltiplas buscas simultâneas ou buscar por filtros específicos.
+    
+    Args:
+        items: Lista de objetos de busca. Cada objeto deve conter:
+               - value (str): O termo, nome da categoria ou valor numérico.
+               - filter_by (str): Onde buscar o 'value'. Opções: 
+                 'category' (nome da categoria), 
+                 'name' (nome do produto), 
+                 'description' (na descrição), 
+                 'price_max' (preço menor ou igual ao value),
+                 'all' (busca geral em nome/descrição/categoria).
+        top_k_per_item: Máximo de resultados por item da lista (default 5).
 
-    IMPORTANTE:
-    - Este tool aceita APENAS o campo `sql` (e opcionalmente `top_k`).
-    - A LLM deve enviar um SELECT explícito no campo `sql`.
-    - Qualquer comando não-SELECT será bloqueado.
-
-    Tabelas permitidas:
-    - public."Product"
-    - public."ProductType"
-    - public."Category"
-    - public."ProductCategory"
-
-    Campos principais de Product:
-    - id, name, description, price, is_active, image_url, production_time, type_id
+    Exemplos:
+    - items=[{"value": "Dia das Mães", "filter_by": "category"}]
+    - items=[{"value": "Cesta", "filter_by": "name"}, {"value": "Vinho", "filter_by": "all"}]
+    - items=[{"value": "150", "filter_by": "price_max"}]
     """
     try:
-        raw_sql = (sql or "").strip()
-        if not raw_sql:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "error_type": "validation_error",
-                    "message": "Campo sql é obrigatório em consultarCatalogo.",
-                },
-                ensure_ascii=False,
-            )
-
-        normalized = re.sub(r"\s+", " ", raw_sql).strip()
-        lowered = normalized.lower()
-
-        if not lowered.startswith("select "):
-            return json.dumps(
-                {
-                    "status": "blocked",
-                    "error_type": "security_error",
-                    "message": "Apenas SELECT é permitido em consultarCatalogo.",
-                },
-                ensure_ascii=False,
-            )
-
-        forbidden = [
-            " insert ", " update ", " delete ", " drop ", " alter ", " truncate ",
-            " create ", " grant ", " revoke ", " merge ", " call ", " execute ", " do ",
-        ]
-        padded = f" {lowered} "
-        if any(token in padded for token in forbidden):
-            return json.dumps(
-                {
-                    "status": "blocked",
-                    "error_type": "security_error",
-                    "message": "Consulta bloqueada: apenas SELECT de leitura é permitido.",
-                },
-                ensure_ascii=False,
-            )
-
-        if ";" in lowered[:-1]:
-            return json.dumps(
-                {
-                    "status": "blocked",
-                    "error_type": "security_error",
-                    "message": "Apenas uma instrução SELECT por chamada é permitida.",
-                },
-                ensure_ascii=False,
-            )
-
-        allowed_tables = {
-            'public."product"', '"product"', "product",
-            'public."producttype"', '"producttype"', "producttype",
-            'public."category"', '"category"', "category",
-            'public."productcategory"', '"productcategory"', "productcategory",
-        }
-        found_tables = re.findall(r"(?:from|join)\s+([\w\.\"]+)", lowered)
-        if not found_tables:
-            return json.dumps(
-                {
-                    "status": "blocked",
-                    "error_type": "security_error",
-                    "message": "Não identifiquei tabela válida no SQL.",
-                },
-                ensure_ascii=False,
-            )
-        for table in found_tables:
-            if table.strip() not in allowed_tables:
-                return json.dumps(
-                    {
-                        "status": "blocked",
-                        "error_type": "security_error",
-                        "message": f"Tabela não permitida: {table}",
-                    },
-                    ensure_ascii=False,
-                )
-
-        safe_top_k = int(top_k) if top_k else 10
-        safe_top_k = max(1, min(100, safe_top_k))
-        final_sql = normalized
-        if not re.search(r"\blimit\b", lowered):
-            final_sql = normalized.rstrip(";") + f" LIMIT {safe_top_k}"
-
         pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(final_sql)
+        all_results = []
+        seen_ids = set()
 
-        result_rows = [dict(r) for r in rows]
-        if not result_rows:
-            return json.dumps(
-                {
-                    "status": "not_found",
-                    "sql": final_sql,
-                    "debug_sql": [
-                        {
-                            "strategy": "direct_sql_only",
-                            "sql": final_sql,
-                            "rows": 0,
-                        }
-                    ],
-                    "exatos": [],
-                    "fallback": [],
-                    "message": "Sem resultados para esta query SQL.",
-                },
-                ensure_ascii=False,
-            )
+        async with pool.acquire() as conn:
+            for item in items:
+                value = str(item.get("value", "")).strip()
+                filter_by = item.get("filter_by", "all")
+                
+                if not value:
+                    continue
+
+                where_clauses = ["p.is_active = true"]
+                params = []
+                
+                # Base query with Joins to ensure full product data even when filtering by category
+                query_base = """
+                    SELECT DISTINCT p.id, p.name, p.description, p.price, p.image_url, p.production_time
+                    FROM public."Product" p
+                    LEFT JOIN public."ProductCategory" pc ON p.id = pc.product_id
+                    LEFT JOIN public."Category" c ON pc.category_id = c.id
+                """
+
+                if filter_by == "category":
+                    where_clauses.append("c.name ILIKE $1")
+                    params.append(f"%{value}%")
+                elif filter_by == "price_max":
+                    try:
+                        price_val = float(value.replace(",", "."))
+                        where_clauses.append("p.price <= $1")
+                        params.append(price_val)
+                    except ValueError:
+                        continue
+                elif filter_by == "name":
+                    where_clauses.append("p.name ILIKE $1")
+                    params.append(f"%{value}%")
+                elif filter_by == "description":
+                    where_clauses.append("p.description ILIKE $1")
+                    params.append(f"%{value}%")
+                else: # 'all' or default
+                    where_clauses.append("(p.name ILIKE $1 OR p.description ILIKE $1 OR c.name ILIKE $1)")
+                    params.append(f"%{value}%")
+
+                final_sql = f"{query_base} WHERE {' AND '.join(where_clauses)} LIMIT {top_k_per_item}"
+                
+                rows = await conn.fetch(final_sql, *params)
+                for r in rows:
+                    if r["id"] not in seen_ids:
+                        all_results.append(dict(r))
+                        seen_ids.add(r["id"])
+
+        if not all_results:
+            return json.dumps({"status": "not_found", "message": "Nenhum produto encontrado para estes critérios."}, ensure_ascii=False)
 
         formatted = []
-        for idx, r in enumerate(result_rows, 1):
-            formatted.append(
-                {
-                    "ranking": idx,
-                    "id": str(r.get("id", "")),
-                    "nome": r.get("name") or r.get("nome") or "",
-                    "preco": float(r.get("price") or r.get("preco") or 0),
-                    "descricao": r.get("description") or r.get("descricao") or "",
-                    "imagem": r.get("image_url") or r.get("imagem") or "https://api.cestodamore.com.br/images/default-product.webp",
-                    "production_time": int(r.get("production_time") or 1),
-                    "tipo_resultado": "EXATO",
-                }
-            )
+        for idx, r in enumerate(all_results, 1):
+            formatted.append({
+                "ranking": idx,
+                "id": str(r["id"]),
+                "nome": r["name"],
+                "preco": float(r["price"]),
+                "descricao": r["description"] or "",
+                "imagem": r["image_url"] or "https://api.cestodamore.com.br/images/default-product.webp",
+                "production_time": int(r["production_time"] or 0),
+                "tipo_resultado": "ESTRUTURADO"
+            })
 
-        return json.dumps(
-            {
-                "status": "found",
-                "sql": final_sql,
-                "debug_sql": [
-                    {
-                        "strategy": "direct_sql_only",
-                        "sql": final_sql,
-                        "rows": len(result_rows),
-                    }
-                ],
-                "exatos": formatted,
-                "fallback": [],
-            },
-            ensure_ascii=False,
-        )
+        return json.dumps({"status": "found", "exatos": formatted}, ensure_ascii=False)
+
+    except Exception as e:
+        _safe_print(f"❌ Erro em consultarCatalogo: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
     except Exception as e:
         _safe_print(f"❌ Erro em consultarCatalogo: {e}")
         return json.dumps({

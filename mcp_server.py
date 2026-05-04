@@ -1705,81 +1705,9 @@ async def consultarCatalogo(
                 _safe_print(f"⚠️ Falha na busca SQL estruturada, seguindo fallback: {sql_struct_error}")
             
             # =====================================================
-            # 2) SECUNDÁRIO: fallback por variações de termo
-            # Regra: só ativa fallback se busca principal retornar ZERO resultados
+            # 2) SECUNDÁRIO DESABILITADO
+            # Conforme decisão de produto: usar APENAS SQL estruturado primário.
             # =====================================================
-            if len(all_rows_by_id) == 0:
-                for search_term in search_terms:
-                    if not search_term.strip() or search_term.strip().lower() in common_words:
-                        continue
-
-                    query = """
-                    SELECT p.id, p.name, p.description, p.price, p.image_url, p.production_time,
-                           pt.name as product_type,
-                           (CASE WHEN p.name ILIKE $1 THEN 100 ELSE 0 END +
-                            CASE WHEN p.description ILIKE $1 THEN 50 ELSE 0 END) as relevance_score,
-                           (p.name ILIKE $1 OR p.description ILIKE $1) as is_exact_match
-                    FROM public."Product" p
-                    LEFT JOIN public."ProductType" pt ON pt.id = p.type_id
-                    WHERE p.price >= $2 AND p.price <= $3 AND p.is_active = true
-                      AND NOT (p.id::TEXT = ANY($4::TEXT[]))
-                      AND ($7::boolean = false OR LOWER(pt.name) = LOWER($6))
-                      AND (
-                        $9::boolean = false
-                        OR EXISTS (
-                          SELECT 1
-                          FROM public."ProductCategory" pc
-                          JOIN public."Category" c ON c.id = pc.category_id
-                          WHERE pc.product_id = p.id
-                            AND LOWER(c.name) = ANY($8::TEXT[])
-                        )
-                      )
-                    ORDER BY is_exact_match DESC, relevance_score DESC, p.price DESC
-                    LIMIT $5;
-                    """
-
-                    rows = await conn.fetch(
-                        query,
-                        f"%{normalize_text(search_term)}%",
-                        preco_minimo,
-                        preco_maximo,
-                        exclude_ids,
-                        top_k,
-                        tipo_norm,
-                        bool(tipo_norm),
-                        categorias_norm,
-                        bool(categorias_norm),
-                    )
-                    executed_sql.append(
-                        {
-                            "strategy": "secondary_term_variation_sql",
-                            "sql": "SELECT Product by term variation + filters",
-                            "params": {
-                                "term": normalize_text(search_term),
-                                "preco_minimo": preco_minimo,
-                                "preco_maximo": preco_maximo,
-                                "tipo_produto": tipo_norm,
-                                "categorias": categorias_norm,
-                                "exclude_ids": exclude_ids,
-                                "top_k": top_k,
-                            },
-                            "rows": len(rows),
-                        }
-                    )
-                    for row in rows:
-                        row_dict = dict(row)
-                        row_id = str(row_dict["id"])
-
-                        if row_id not in all_rows_by_id:
-                            all_rows_by_id[row_id] = row_dict
-                            continue
-
-                        existing = all_rows_by_id[row_id]
-                        existing["relevance_score"] = max(
-                            int(existing.get("relevance_score") or 0),
-                            int(row_dict.get("relevance_score") or 0),
-                        )
-                        existing["is_exact_match"] = bool(existing.get("is_exact_match")) or bool(row_dict.get("is_exact_match"))
 
             all_rows = list(all_rows_by_id.values())
             

@@ -1418,7 +1418,7 @@ def _normalize_product_search_term(termo: str) -> str:
 
 @mcp.tool()
 async def consultarCatalogo(
-    items: List[Dict[str, Any]],
+    items: Optional[List[Dict[str, Any]]] = None,
     top_k_per_item: Optional[int] = 5,
 ) -> str:
     """
@@ -1443,6 +1443,19 @@ async def consultarCatalogo(
     - items=[{"value": "150", "filter_by": "price_max"}]
     """
     try:
+        if not items or not isinstance(items, list):
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error_type": "validation_error",
+                    "message": "Parâmetro 'items' é obrigatório e deve ser uma lista de buscas.",
+                },
+                ensure_ascii=False,
+            )
+
+        safe_top_k = int(top_k_per_item) if top_k_per_item else 5
+        safe_top_k = max(1, min(50, safe_top_k))
+
         pool = await get_db_pool()
         all_results = []
         seen_ids = set()
@@ -1486,7 +1499,7 @@ async def consultarCatalogo(
                     where_clauses.append("(p.name ILIKE $1 OR p.description ILIKE $1 OR c.name ILIKE $1)")
                     params.append(f"%{value}%")
 
-                final_sql = f"{query_base} WHERE {' AND '.join(where_clauses)} LIMIT {top_k_per_item}"
+                final_sql = f"{query_base} WHERE {' AND '.join(where_clauses)} LIMIT {safe_top_k}"
                 
                 rows = await conn.fetch(final_sql, *params)
                 for r in rows:
@@ -1514,15 +1527,14 @@ async def consultarCatalogo(
 
     except Exception as e:
         _safe_print(f"❌ Erro em consultarCatalogo: {e}")
-        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
-
-    except Exception as e:
-        _safe_print(f"❌ Erro em consultarCatalogo: {e}")
-        return json.dumps({
-            "status": "error", 
-            "error_type": "database_error",
-            "message": str(e)
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "error",
+                "error_type": "database_error",
+                "message": str(e),
+            },
+            ensure_ascii=False,
+        )
 
 
 @mcp.tool()

@@ -1458,6 +1458,7 @@ async def consultarCatalogo(
     """
     try:
         contexto_limpo = (contexto or "").strip()
+        executed_sql: List[Dict[str, Any]] = []
         
         # ⚠️ Validação crítica
         if not contexto_limpo or contexto_limpo.lower() == termo.lower():
@@ -1504,6 +1505,15 @@ async def consultarCatalogo(
             categorias_norm = [str(c).strip().lower() for c in (categorias or []) if str(c).strip()]
             tipo_norm = (tipo_produto or "").strip().lower()
             ordenar_norm = (ordenar_por or "relevancia").strip().lower()
+
+            def normalize_text(value: str) -> str:
+                base = (value or "").strip().lower()
+                return "".join(
+                    c for c in unicodedata.normalize("NFD", base)
+                    if unicodedata.category(c) != "Mn"
+                )
+
+            categorias_norm = [normalize_text(c) for c in categorias_norm]
 
             _safe_print(f"🔍 Busca: termo='{termo_normalizado}', preço=[{preco_minimo:.2f}-{preco_maximo:.2f}]")
 
@@ -1576,7 +1586,7 @@ async def consultarCatalogo(
             try:
                 sql_context = f"{termo_normalizado} {contexto_limpo}".strip().lower()
                 context_tokens = [
-                    t for t in re.split(r"[^a-zA-ZÀ-ÿ0-9]+", sql_context)
+                    normalize_text(t) for t in re.split(r"[^a-zA-ZÀ-ÿ0-9]+", sql_context)
                     if t and len(t) >= 3 and t not in common_words
                 ][:20]
 
@@ -1600,9 +1610,9 @@ async def consultarCatalogo(
                     pt.name AS product_type,
                     COALESCE(array_agg(DISTINCT c.name) FILTER (WHERE c.name IS NOT NULL), '{}') AS categories,
                     (
-                        CASE WHEN LOWER(p.name) LIKE LOWER($1) THEN 180 ELSE 0 END +
-                        CASE WHEN LOWER(p.description) LIKE LOWER($1) THEN 80 ELSE 0 END +
-                        CASE WHEN $7::boolean AND LOWER(pt.name) = LOWER($6) THEN 70 ELSE 0 END +
+                        CASE WHEN translate(lower(p.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1 THEN 180 ELSE 0 END +
+                        CASE WHEN translate(lower(COALESCE(p.description, '')), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1 THEN 80 ELSE 0 END +
+                        CASE WHEN $7::boolean AND translate(lower(pt.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = $6 THEN 70 ELSE 0 END +
                         CASE
                             WHEN array_length($8::TEXT[], 1) IS NOT NULL THEN
                                 (
@@ -1610,14 +1620,14 @@ async def consultarCatalogo(
                                     FROM public."ProductCategory" pc2
                                     JOIN public."Category" c2 ON c2.id = pc2.category_id
                                     WHERE pc2.product_id = p.id
-                                      AND LOWER(c2.name) = ANY($8::TEXT[])
+                                      AND translate(lower(c2.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = ANY($8::TEXT[])
                                 )
                             ELSE 0
                         END
                     ) AS relevance_score,
                     (
-                        LOWER(p.name) LIKE LOWER($1)
-                        OR LOWER(p.description) LIKE LOWER($1)
+                        translate(lower(p.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1
+                        OR translate(lower(COALESCE(p.description, '')), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE $1
                     ) AS is_exact_match
                 FROM public."Product" p
                 LEFT JOIN public."ProductType" pt ON pt.id = p.type_id
@@ -1627,7 +1637,7 @@ async def consultarCatalogo(
                   AND p.price >= $2
                   AND p.price <= $3
                   AND NOT (p.id::TEXT = ANY($4::TEXT[]))
-                  AND ($7::boolean = false OR LOWER(pt.name) = LOWER($6))
+                  AND ($7::boolean = false OR translate(lower(pt.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = $6)
                   AND (
                       array_length($8::TEXT[], 1) IS NULL
                       OR EXISTS (
@@ -1635,7 +1645,7 @@ async def consultarCatalogo(
                           FROM public."ProductCategory" pcx
                           JOIN public."Category" cx ON cx.id = pcx.category_id
                           WHERE pcx.product_id = p.id
-                            AND LOWER(cx.name) = ANY($8::TEXT[])
+                            AND translate(lower(cx.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') = ANY($8::TEXT[])
                       )
                   )
                   AND (
@@ -1643,8 +1653,8 @@ async def consultarCatalogo(
                       OR EXISTS (
                           SELECT 1
                           FROM unnest($10::TEXT[]) tk
-                          WHERE LOWER(p.name) LIKE ('%' || tk || '%')
-                             OR LOWER(COALESCE(p.description, '')) LIKE ('%' || tk || '%')
+                          WHERE translate(lower(p.name), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE ('%' || tk || '%')
+                             OR translate(lower(COALESCE(p.description, '')), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc') LIKE ('%' || tk || '%')
                       )
                   )
                 GROUP BY p.id, pt.name
@@ -1654,7 +1664,7 @@ async def consultarCatalogo(
 
                 primary_rows = await conn.fetch(
                     primary_query,
-                    f"%{termo_normalizado}%",
+                    f"%{normalize_text(termo_normalizado)}%",
                     preco_minimo,
                     preco_maximo,
                     exclude_ids,
@@ -1664,6 +1674,23 @@ async def consultarCatalogo(
                     category_tokens,
                     bool(context_tokens),
                     context_tokens,
+                )
+                executed_sql.append(
+                    {
+                        "strategy": "primary_structured_sql",
+                        "sql": "SELECT Product + joins with filters (price/type/category/context_tokens)",
+                        "params": {
+                            "term": normalize_text(termo_normalizado),
+                            "preco_minimo": preco_minimo,
+                            "preco_maximo": preco_maximo,
+                            "tipo_produto": tipo_norm,
+                            "categorias": category_tokens,
+                            "context_tokens": context_tokens,
+                            "exclude_ids": exclude_ids,
+                            "top_k": top_k,
+                        },
+                        "rows": len(primary_rows),
+                    }
                 )
 
                 for row in primary_rows:
@@ -1679,8 +1706,9 @@ async def consultarCatalogo(
             
             # =====================================================
             # 2) SECUNDÁRIO: fallback por variações de termo
+            # Regra: só ativa fallback se busca principal retornar ZERO resultados
             # =====================================================
-            if len(all_rows_by_id) < max(2, top_k // 2):
+            if len(all_rows_by_id) == 0:
                 for search_term in search_terms:
                     if not search_term.strip() or search_term.strip().lower() in common_words:
                         continue
@@ -1712,7 +1740,7 @@ async def consultarCatalogo(
 
                     rows = await conn.fetch(
                         query,
-                        f"%{search_term}%",
+                        f"%{normalize_text(search_term)}%",
                         preco_minimo,
                         preco_maximo,
                         exclude_ids,
@@ -1721,6 +1749,22 @@ async def consultarCatalogo(
                         bool(tipo_norm),
                         categorias_norm,
                         bool(categorias_norm),
+                    )
+                    executed_sql.append(
+                        {
+                            "strategy": "secondary_term_variation_sql",
+                            "sql": "SELECT Product by term variation + filters",
+                            "params": {
+                                "term": normalize_text(search_term),
+                                "preco_minimo": preco_minimo,
+                                "preco_maximo": preco_maximo,
+                                "tipo_produto": tipo_norm,
+                                "categorias": categorias_norm,
+                                "exclude_ids": exclude_ids,
+                                "top_k": top_k,
+                            },
+                            "rows": len(rows),
+                        }
                     )
                     for row in rows:
                         row_dict = dict(row)
@@ -1793,57 +1837,14 @@ async def consultarCatalogo(
             missing_slots = max(0, top_k - len(exact_matches))
 
             if missing_slots > 0 and fallback_matches:
-                profile = _infer_search_profile(termo_normalizado, contexto_limpo)
-                semantic_query_text = f"{termo_normalizado}. {contexto_limpo}".strip()
-
-                query_embedding: List[float] = []
-                try:
-                    query_embedding = await _get_embedding_cached(semantic_query_text)
-                except Exception as emb_error:
-                    _safe_print(f"⚠️ Embedding indisponível na fallback semântica: {emb_error}")
-
-                if query_embedding:
-                    await _ensure_product_embeddings(fallback_matches)
-
-                    scored_fallback: List[Dict[str, Any]] = []
-                    for candidate in fallback_matches:
-                        candidate_id = str(candidate.get("id"))
-                        cached = PRODUCT_EMBEDDINGS.get(candidate_id)
-                        product_embedding = (cached or {}).get("embedding") if cached else None
-                        if not product_embedding:
-                            continue
-
-                        candidate_text = _build_product_text(candidate)
-                        score = _semantic_fallback_score(
-                            query_embedding,
-                            product_embedding,
-                            semantic_query_text,
-                            candidate_text,
-                            profile,
-                        )
-
-                        candidate["semantic_score"] = float(score)
-                        scored_fallback.append(candidate)
-
-                    def _fb_name_match(row: Dict[str, Any]):
-                        normalized_name = _normalize_embedding_text(row.get("name") or "")
-                        return 1 if (requested_keywords and any(k in normalized_name for k in requested_keywords)) else 0
-
-                    scored_fallback = sorted(
-                        scored_fallback,
-                        key=lambda r: (
-                            -float(r.get("semantic_score") or -999),
-                            -_fb_name_match(r),
-                            -_priority_boost(r),
-                            -float(r.get("price") or 0) if prefer_high_price else 0,
-                            -float(r.get("price") or 0),
-                        ),
-                    )
-
-                    strong_scored = [r for r in scored_fallback if float(r.get("semantic_score") or 0.0) >= 0.24]
-                    fallback_matches = (strong_scored or scored_fallback)[:missing_slots]
-                else:
-                    fallback_matches = fallback_matches[:missing_slots]
+                fallback_matches = sorted(
+                    fallback_matches,
+                    key=lambda r: (
+                        -_priority_boost(r),
+                        -float(r.get("relevance_score") or 0),
+                        -float(r.get("price") or 0) if prefer_high_price else float(r.get("price") or 0),
+                    ),
+                )[:missing_slots]
             else:
                 fallback_matches = fallback_matches[:missing_slots]
 
@@ -1855,6 +1856,7 @@ async def consultarCatalogo(
                 "status": "found" if (exact_matches or fallback_matches) else "not_found",
                 "termo": termo,
                 "contexto": contexto_limpo,
+                "debug_sql": executed_sql,
                 "exatos": [
                     {
                         "ranking": idx + 1,
@@ -1882,6 +1884,9 @@ async def consultarCatalogo(
                     for idx, r in enumerate(fallback_matches)
                 ]
             }
+
+            if executed_sql:
+                _safe_print(f"🧾 SQL debug: {json.dumps(executed_sql[:3], ensure_ascii=False)}")
             
             return json.dumps(structured, ensure_ascii=False)
 

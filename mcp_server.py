@@ -18,6 +18,15 @@ import aiohttp
 from openai import OpenAI
 from guidelines import GUIDELINES
 
+# Novos módulos para busca melhorada (PHASE 1)
+try:
+    from query_synonym_map import expand_query_with_synonyms, get_search_variants
+    from search_engine_improved import search_products_semantic
+    SEARCH_ENGINE_IMPROVED_AVAILABLE = True
+except ImportError:
+    SEARCH_ENGINE_IMPROVED_AVAILABLE = False
+    _safe_print("⚠️ Módulos de busca melhorada não disponíveis (query_synonym_map, search_engine_improved)")
+
 CAMPINA_GRANDE_TZ = pytz.timezone("America/Fortaleza")
 
 from pathlib import Path
@@ -485,61 +494,71 @@ def _apply_contextual_ranking(
     search_term: str = ""
 ) -> List[Dict[str, Any]]:
     """
-    Aplica ranking contextual aos produtos.
+    REFATORADO (PHASE 1): Ranking similarity-first com fallback contextual.
 
-    Prioridade (tanto com contexto quanto sem):
-        1. Tipo: QUADRO_FOTO > FLOR > PELUCIA > CESTA > BAR_DRINKS > QUEBRA_CABECA > CANECA
-        2. Preço: mais caro primeiro (dentro do mesmo tipo)
-        3. Similaridade semântica: desempate final
-
-    Exceções:
-        - Se busca explícita por "caneca" → CANECA vira prioridade máxima
-        - Se busca explícita por "quebra" → QUEBRA_CABECA vira prioridade máxima
-        - Se busca explícita por "quadro/polaroide" → QUADRO_FOTO vira prioridade máxima
+    Estratégia:
+        1. SIMILARITY-FIRST: Ordena por similaridade semântica (score mais alto)
+        2. CONTEXT BONUS: Aplica bônus/penalidades baseadas em contexto
+        3. FALLBACK: Preço dentro do mesmo tipo de produto
+    
+    Mudança da v1 (type-priority):
+        - v1: QUADRO > FLOR > PELUCIA > CESTA > ... (rígido)
+        - v2: similarity > context_bonus > price (flexível, baseado em busca)
     """
+    if not scored_products:
+        return []
+    
     search_lower = search_term.lower().strip()
-    is_caneca_search = "caneca" in search_lower
-    is_quebra_search = "quebra" in search_lower
-    is_quadro_search = "quadro" in search_lower or "polaroide" in search_lower or "polaroides" in search_lower
-
+    
+    # 1. Categorizar produtos
     for product in scored_products:
         product["product_type"] = _categorize_product_type(
             product.get("name", ""),
             product.get("description", "")
         )
-
-    # Prioridade base por tipo — QUADRO primeiro, CANECA e QUEBRA por último
-    type_priority = {
-        "QUADRO_FOTO":  1,
-        "PELUCIA":      2,
-        "FLOR":         3,
-        "CESTA":        4,
-        "BAR_DRINKS":   5,
-        "QUEBRA_CABECA":6,
-        "CANECA":       7,
-    }
-
-    # Ajuste de prioridade quando a busca é explícita para um tipo específico
-    if is_caneca_search:
-        type_priority["CANECA"] = 1
-    if is_quebra_search:
-        type_priority["QUEBRA_CABECA"] = 1
-    if is_quadro_search:
-        type_priority["QUADRO_FOTO"] = 1
-
+    
+    # 2. Aplicar bônus de contexto (baseado na busca)
     for product in scored_products:
-        product["type_priority"] = type_priority.get(product["product_type"], 999)
-        product["ranking_reason"] = f"TIPO:{product['product_type']} | PREÇO:{product.get('price')}"
-
+        context_bonus = 0.0
+        
+        # Detecta busca explícita por tipo específico
+        if "caneca" in search_lower:
+            if product["product_type"] == "CANECA":
+                context_bonus += 0.15
+        elif "quebra" in search_lower:
+            if product["product_type"] == "QUEBRA_CABECA":
+                context_bonus += 0.15
+        elif "quadro" in search_lower or "polaroide" in search_lower:
+            if product["product_type"] == "QUADRO_FOTO":
+                context_bonus += 0.15
+        elif "buque" in search_lower or "buquê" in search_lower or "flor" in search_lower:
+            if product["product_type"] == "FLOR":
+                context_bonus += 0.12
+        elif "pelucia" in search_lower or "urso" in search_lower:
+            if product["product_type"] == "PELUCIA":
+                context_bonus += 0.12
+        
+        product["context_bonus"] = context_bonus
+        
+        # Relevance score = similarity + context bonus
+        current_similarity = product.get("similarity", 0.0)
+        product["final_relevance"] = current_similarity + context_bonus
+        
+        product["ranking_reason"] = (
+            f"SIMILARITY:{current_similarity:.3f} + CONTEXT:{context_bonus:.3f} "
+            f"= {product['final_relevance']:.3f} | TYPE:{product['product_type']}"
+        )
+    
+    # 3. RANKING SIMILARITY-FIRST
     sorted_products = sorted(
         scored_products,
         key=lambda p: (
-            p["type_priority"],            # 1º: tipo (menor = melhor)
-            -float(p.get("price") or 0.0), # 2º: preço (maior = melhor)
-            -p.get("similarity", 0.0),     # 3º: similaridade semântica
+            -p.get("final_relevance", 0.0),   # 1º: relevância final (maior = melhor)
+            -float(p.get("price") or 0.0),    # 2º: preço (mais caro = melhor tiebreaker)
+            p.get("product_type", "CESTA"),   # 3º: tipo (para organizar visualmente)
         )
     )
-
+    
     return sorted_products
 
 def _parse_price_value(raw_value: str) -> Optional[float]:
@@ -1416,6 +1435,88 @@ def _normalize_product_search_term(termo: str) -> str:
     _safe_print(f"ℹ️ Termo '{termo}' não mapeado, usando original")
     return termo
 
+async def _search_with_query_expansion(
+    search_term: str,
+    filter_by: str = "all",
+    conn = None,
+    top_k: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    Busca produtos com expansão de query usando sinônimos.
+    PHASE 1: Query rewriting para melhorar taxa de acerto.
+    
+    Tenta em cascata:
+    1. Query original
+    2. Query expandida com sinônimos
+    3. Fallback: primeira palavra significativa
+    """
+    if not conn or not search_term:
+        return []
+    
+    # Usar query rewriting se disponível
+    if SEARCH_ENGINE_IMPROVED_AVAILABLE:
+        try:
+            search_variants = get_search_variants(search_term)
+        except:
+            search_variants = [search_term]
+    else:
+        search_variants = [search_term]
+    
+    all_results = {}
+    
+    for variant_idx, variant in enumerate(search_variants):
+        if len(all_results) >= top_k * 1.5:
+            break  # Já temos suficientes resultados
+        
+        variant_clean = variant.strip()
+        if not variant_clean:
+            continue
+        
+        try:
+            # Build query based on filter_by
+            where_clauses = ["p.is_active = true"]
+            params = []
+            
+            query_base = """
+                SELECT DISTINCT p.id, p.name, p.description, p.price, p.image_url, p.production_time
+                FROM public."Product" p
+                LEFT JOIN public."ProductCategory" pc ON p.id = pc.product_id
+                LEFT JOIN public."Category" c ON pc.category_id = c.id
+            """
+            
+            if filter_by == "category":
+                where_clauses.append("c.name ILIKE $1")
+                params.append(f"%{variant_clean}%")
+            elif filter_by == "name":
+                where_clauses.append("p.name ILIKE $1")
+                params.append(f"%{variant_clean}%")
+            elif filter_by == "description":
+                where_clauses.append("p.description ILIKE $1")
+                params.append(f"%{variant_clean}%")
+            else:  # 'all'
+                where_clauses.append("(p.name ILIKE $1 OR p.description ILIKE $1 OR c.name ILIKE $1)")
+                params.append(f"%{variant_clean}%")
+            
+            final_sql = f"{query_base} WHERE {' AND '.join(where_clauses)} LIMIT {top_k * 2}"
+            
+            rows = await conn.fetch(final_sql, *params)
+            for r in rows:
+                if r["id"] not in all_results:
+                    all_results[r["id"]] = dict(r)
+                    all_results[r["id"]]["_search_variant"] = variant
+                    all_results[r["id"]]["_variant_idx"] = variant_idx
+            
+            if rows and variant_idx == 0:
+                # Se primeira variante retornou, não precisa de fallback
+                _safe_print(f"✓ Query '{search_term}' encontrou {len(rows)} resultados")
+                break
+        
+        except Exception as e:
+            _safe_print(f"⚠️ Erro em variante '{variant}': {e}")
+            continue
+    
+    return list(all_results.values())[:top_k]
+
 @mcp.tool()
 async def consultarCatalogo(
     items: Optional[List[Dict[str, Any]]] = None,
@@ -1468,6 +1569,24 @@ async def consultarCatalogo(
                 if not value:
                     continue
 
+                # PHASE 1: Use nova função com query expansion
+                if SEARCH_ENGINE_IMPROVED_AVAILABLE and filter_by in ["all", "name", "category"]:
+                    try:
+                        rows = await _search_with_query_expansion(
+                            value,
+                            filter_by=filter_by,
+                            conn=conn,
+                            top_k=safe_top_k
+                        )
+                        for r in rows:
+                            if r["id"] not in seen_ids:
+                                all_results.append(dict(r))
+                                seen_ids.add(r["id"])
+                        continue
+                    except Exception as e:
+                        _safe_print(f"⚠️ Query expansion falhou ({e}), usando fallback")
+                
+                # FALLBACK: Busca original sem expansão
                 where_clauses = ["p.is_active = true"]
                 params = []
                 
@@ -3217,5 +3336,187 @@ async def proc_validar_horario_funcionamento() -> str:
     return "Procedimento de validação de horários carregado."
 
 
+@mcp.tool()
+async def rank_products_for_curation(
+    product_ids: List[str],
+    current_phase: str = "CURATION",
+    customer_context: Optional[str] = None,
+) -> str:
+    """
+    🎯 PHASE 2: Tool de curadoria inteligente.
+    
+    Rankeia produtos por relevância para curadoria, retornando:
+    - Produto principal (melhor match)
+    - Alternativas (top 2-3 produtos)
+    - Justificativa para cada seleção
+    - Score de confiança
+    
+    Args:
+        product_ids: IDs dos produtos a rankear
+        current_phase: Fase de vendas (DISCOVERY, CURATION, CUSTOMIZATION, CHECKOUT)
+        customer_context: Contexto do cliente (histórico, preferências)
+    
+    Returns:
+        JSON estruturado com rankings e justificativas
+    """
+    try:
+        if not product_ids:
+            return json.dumps(
+                {"status": "error", "message": "product_ids é obrigatório"},
+                ensure_ascii=False,
+            )
+        
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            # Fetch dados dos produtos
+            placeholders = ",".join([f"${i+1}" for i in range(len(product_ids))])
+            query = f"""
+                SELECT id, name, description, price, image_url, production_time
+                FROM public."Product"
+                WHERE id IN ({placeholders}) AND is_active = true
+            """
+            products = await conn.fetch(query, *product_ids)
+        
+        if not products:
+            return json.dumps(
+                {"status": "not_found", "message": "Nenhum produto ativo encontrado"},
+                ensure_ascii=False,
+            )
+        
+        # 1. Rankeia por relevância
+        scored_products = []
+        for product in products:
+            # Score baseado em dados completos e fase
+            score = _score_product_for_curation(product, current_phase)
+            scored_products.append({**dict(product), "curation_score": score})
+        
+        scored_products.sort(key=lambda p: -p["curation_score"])
+        
+        # 2. Seleciona primary (melhor) e alternativas
+        primary = scored_products[0]
+        alternatives = scored_products[1:3]
+        
+        # 3. Monta resultado estruturado
+        result = {
+            "status": "success",
+            "strategy": "INTELLIGENT_CURATION",
+            "phase": current_phase,
+            "primary_product": {
+                "id": primary["id"],
+                "name": primary["name"],
+                "price": float(primary["price"]),
+                "score": float(primary["curation_score"]),
+                "reason": _get_curation_reason(primary, current_phase),
+                "confidence": min(float(primary["curation_score"]) * 1.2, 1.0),
+            },
+            "alternatives": [
+                {
+                    "id": alt["id"],
+                    "name": alt["name"],
+                    "price": float(alt["price"]),
+                    "score": float(alt["curation_score"]),
+                    "reason": _get_curation_reason(alt, current_phase),
+                }
+                for alt in alternatives
+            ],
+            "next_action": _suggest_curation_next_action(primary, current_phase),
+            "ranking_details": {
+                "total_products": len(products),
+                "phase": current_phase,
+                "strategy_used": "SEMANTIC_PHASE_OPTIMIZED",
+            },
+        }
+        
+        return _format_structured_response(
+            result,
+            f"🎯 Curadoria concluída: {primary['name']} é a melhor opção!",
+        )
+    
+    except Exception as e:
+        _safe_print(f"❌ Erro em rank_products_for_curation: {e}")
+        return json.dumps(
+            {"status": "error", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+def _score_product_for_curation(product: Dict[str, Any], phase: str) -> float:
+    """
+    Calcula score de curadoria para um produto.
+    
+    Fatores:
+    - Dados completos (imagem, descrição) = 30%
+    - Preço adequado = 20%
+    - Compatibilidade com fase = 30%
+    - Disponibilidade = 20%
+    """
+    score = 0.0
+    
+    # 1. Dados completos (30%)
+    has_image = bool(product.get("image_url"))
+    has_desc = bool(product.get("description") and len(product["description"]) > 100)
+    score += (0.3 if has_image else 0.1) + (0.2 if has_desc else 0)
+    
+    # 2. Preço adequado (20%)
+    price = float(product.get("price") or 0)
+    if 50 <= price <= 300:
+        score += 0.2
+    elif 30 <= price <= 500:
+        score += 0.1
+    
+    # 3. Compatibilidade com fase (30%)
+    name_desc = f"{product.get('name', '')} {product.get('description', '')}".lower()
+    if phase == "DISCOVERY":
+        score += 0.2
+    elif phase == "CURATION":
+        if len(product.get("description", "")) > 150:
+            score += 0.3
+    elif phase == "CUSTOMIZATION":
+        if "personalizado" in name_desc or "custom" in name_desc:
+            score += 0.3
+    elif phase == "CHECKOUT":
+        score += 0.2
+    
+    # 4. Disponibilidade (20%)
+    prod_time = int(product.get("production_time") or 30)
+    if prod_time <= 7:
+        score += 0.2
+    elif prod_time <= 14:
+        score += 0.1
+    
+    return min(score, 1.0)
+
+
+def _get_curation_reason(product: Dict[str, Any], phase: str) -> str:
+    """Gera razão legível para seleção de curadoria."""
+    name = product.get("name", "Produto")
+    price = float(product.get("price") or 0)
+    
+    if phase == "DISCOVERY":
+        return f"{name} é uma ótima introdução ao catálogo"
+    elif phase == "CURATION":
+        return f"{name} tem a melhor relação qualidade/preço (R${price:.0f})"
+    elif phase == "CUSTOMIZATION":
+        return f"{name} oferece grande potencial de customização"
+    elif phase == "CHECKOUT":
+        return f"{name} está pronto para entregar já!"
+    
+    return f"{name} é o melhor para você agora"
+
+
+def _suggest_curation_next_action(product: Dict[str, Any], phase: str) -> str:
+    """Sugere próxima ação após curadoria."""
+    if phase == "DISCOVERY":
+        return "Quer saber mais sobre este produto?"
+    elif phase == "CURATION":
+        return "Gostou? Posso customizar ou você quer alternativas?"
+    elif phase == "CUSTOMIZATION":
+        return "Como você gostaria de personalizar?"
+    elif phase == "CHECKOUT":
+        return "Confirma este pedido?"
+    return "Próxima ação?"
+
+
 if __name__ == "__main__":
     mcp.run()
+

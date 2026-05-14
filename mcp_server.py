@@ -1517,10 +1517,65 @@ async def _search_with_query_expansion(
     
     return list(all_results.values())[:top_k]
 
+DEFAULT_PRODUCT_IMAGE = "https://api.cestodamore.com.br/images/default-product.webp"
+
+
+def _merch_highlights(name: str, desc: str) -> List[str]:
+    h: List[str] = []
+    t = f"{name} {desc}".lower()
+    if "quadro" in t or "polaroide" in t or "polaroid" in t:
+        h.append("Destaque: Quadro ou Polaroides")
+    if "cesta" in t:
+        h.append("Cesta montada para ocasiao especial")
+    if "chocolate" in t:
+        h.append("Inclui chocolates")
+    return h[:4]
+
+
+def _apply_merchandising_score(row: Dict[str, Any], ctx: Dict[str, Any]) -> float:
+    score = 0.0
+    name = str(row.get("name") or "")
+    desc = str(row.get("description") or "")
+    blob = f"{name} {desc}".lower()
+    if "quadro" in blob or "polaroide" in blob or "polaroid" in blob:
+        score += 30.0
+    price = float(row.get("price") or 0)
+    if price >= 200:
+        score += 20.0
+    elif price >= 150:
+        score += 10.0
+    img = str(row.get("image_url") or "")
+    if (not img.strip()) or (DEFAULT_PRODUCT_IMAGE in img):
+        score -= 10.0
+    bh = str(ctx.get("budget_hint") or "").lower()
+    if bh:
+        nums = re.findall(r"\d+(?:[.,]\d{1,2})?", bh)
+        mx = 0.0
+        for n in nums:
+            try:
+                mx = max(mx, float(n.replace(",", ".")))
+            except ValueError:
+                pass
+        if mx > 0 and price > 0 and price <= mx * 1.15:
+            score += 15.0
+    for tag in ctx.get("boost_tags") or []:
+        tagl = str(tag).lower()
+        if tagl and tagl in blob:
+            score += 5.0
+    occ = str(ctx.get("occasion") or "").lower()
+    if occ and occ in blob:
+        score += 8.0
+    rec = str(ctx.get("recipient") or "").lower()
+    if rec and rec in blob:
+        score += 5.0
+    return score
+
+
 @mcp.tool()
 async def consultarCatalogo(
     items: Optional[List[Dict[str, Any]]] = None,
     top_k_per_item: Optional[int] = 5,
+    context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     🔍 Busca estruturada no catálogo de produtos.
@@ -1537,6 +1592,7 @@ async def consultarCatalogo(
                  'price_max' (preço menor ou igual ao value),
                  'all' (busca geral em nome/descrição/categoria).
         top_k_per_item: Máximo de resultados por item da lista (default 5).
+        context: Opcional — occasion, budget_hint, boost_tags[], recipient para merchandising e ranking.
 
     Exemplos:
     - items=[{"value": "Dia das Mães", "filter_by": "category"}]
@@ -1629,20 +1685,52 @@ async def consultarCatalogo(
         if not all_results:
             return json.dumps({"status": "not_found", "message": "Nenhum produto encontrado para estes critérios."}, ensure_ascii=False)
 
+        ctx: Dict[str, Any] = context if isinstance(context, dict) else {}
+        enriched: List[Dict[str, Any]] = []
+        for r in all_results:
+            row = dict(r)
+            row["_merch_score"] = _apply_merchandising_score(row, ctx)
+            enriched.append(row)
+        enriched.sort(key=lambda x: -float(x.get("_merch_score") or 0))
+        top_k_curation = 2
+        picked = enriched[:top_k_curation]
+
         formatted = []
-        for idx, r in enumerate(all_results, 1):
+        for idx, r in enumerate(picked, 1):
+            nm = r["name"]
+            desc = (r.get("description") or "") or ""
+            img = r.get("image_url") or DEFAULT_PRODUCT_IMAGE
+            blob = f"{nm} {desc}".lower()
+            is_premium = (
+                "quadro" in blob or "polaroide" in blob or "polaroid" in blob
+            )
+            if idx == 1:
+                tipo_res = "PREMIUM_BOOST" if is_premium else "ALTERNATIVA"
+            else:
+                tipo_res = "ALTERNATIVA"
+            highlights = _merch_highlights(nm, desc)
             formatted.append({
                 "ranking": idx,
                 "id": str(r["id"]),
-                "nome": r["name"],
+                "nome": nm,
                 "preco": float(r["price"]),
-                "descricao": r["description"] or "",
-                "imagem": r["image_url"] or "https://api.cestodamore.com.br/images/default-product.webp",
+                "descricao": desc,
+                "imagem": img,
                 "production_time": int(r["production_time"] or 0),
-                "tipo_resultado": "ESTRUTURADO"
+                "merch_score": round(float(r.get("_merch_score") or 0), 2),
+                "highlights": highlights,
+                "tipo_resultado": tipo_res,
             })
 
-        return json.dumps({"status": "found", "exatos": formatted}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "found",
+                "exatos": formatted,
+                "context_applied": bool(ctx),
+                "top_k_curation": top_k_curation,
+            },
+            ensure_ascii=False,
+        )
 
     except Exception as e:
         _safe_print(f"❌ Erro em consultarCatalogo: {e}")

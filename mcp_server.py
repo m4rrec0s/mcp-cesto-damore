@@ -25,7 +25,7 @@ try:
     SEARCH_ENGINE_IMPROVED_AVAILABLE = True
 except ImportError:
     SEARCH_ENGINE_IMPROVED_AVAILABLE = False
-    _safe_print("⚠️ Módulos de busca melhorada não disponíveis (query_synonym_map, search_engine_improved)")
+    print("⚠️ Módulos de busca melhorada não disponíveis (query_synonym_map, search_engine_improved)")
 
 CAMPINA_GRANDE_TZ = pytz.timezone("America/Fortaleza")
 
